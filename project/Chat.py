@@ -53,9 +53,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - Начать общение\n"
         "/help - Показать справку\n"
         "/about - Данные о модели \n\n"
-        "/ask - Задать вопрос Yandex GPT\n\n"
         "/gpt - Включить режим чата (с контекстом)\n"
-        "/clear - Очистить историю диалога"
+        "/clear - Очистить историю диалога (забыть контекст)"
     )
     await update.message.reply_text(welcome_text)
 
@@ -68,20 +67,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Основные:
 /help - Показать эту справку
 /about - Данные о текущей модели
-
-Yandex GPT:
-/ask - Задать вопрос Yandex GPT
-/gpt - Поговорить с Yandex GPT (альтернатива)
-
-Задать вопрос
-/ask Как работает ИИ?
-
-Войти в режим чата
-/gpt 
-Давай поговорим о ... (нужно сначала выполнить команду gpt, только потом начать общение)
-
-Очистить историю диалога
-/clear
+/gpt - Включить режим чата (с контекстом)
+/clear - Очистить историю диалога (забыть контекст)
     """
     await update.message.reply_text(help_text)
 
@@ -166,21 +153,7 @@ async def get_yandex_gpt_response(
         raise
 
 
-# Обработчик команды /ask
-async def ask_yandex_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /ask"""
-    if not context.args:
-        await update.message.reply_text(
-            "Использование: /ask [ваш вопрос]\n\n"
-            "Пример: /ask Как работает искусственный интеллект?"
-        )
-        return
-
-    question = ' '.join(context.args)
-    await handle_gpt_request(update, context, question)
-
-
-# Обработчик команды /gpt - альтернатива /ask
+# Обработчик команды /gpt
 async def gpt_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начать диалог с Yandex GPT"""
     await update.message.reply_text(
@@ -317,7 +290,6 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("clear", clear_history))
-    application.add_handler(CommandHandler("ask", ask_yandex_gpt))
     application.add_handler(CommandHandler("about", model_info))
 
     # Регистрируем ConversationHandler
