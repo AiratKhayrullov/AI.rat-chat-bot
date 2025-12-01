@@ -1,2 +1,8 @@
 # AI.rat-chat-bot
-Первая попытка создать тг бота (так еще сразу и с AI)
+
+Пробный чат бот с применением AI
+
+Основная инфа:
+Язык: Python
+Способ общения: Telegram bot
+Модель: yandexgpt/latest (YandexGPT 5 Pro)
