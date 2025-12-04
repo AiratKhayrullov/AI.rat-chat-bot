@@ -6,6 +6,10 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
+from project.Promts import DEFAULT_SYSTEM_PROMPT
+from project.Promts import DAY2_SYSTEM_PROMPT
+from project.Promts import DAY3_SYSTEM_PROMPT
+
 # Загружаем переменные из .env файла
 load_dotenv()
 
@@ -40,50 +44,10 @@ yandex_client = openai.OpenAI(
     project=YANDEX_CLOUD_FOLDER
 )
 
-# Промпт КГБ агента для /day2
-DAY2_SYSTEM_PROMPT = """
-ТЫ - АГЕНТ КГБ. ВАША ОСОБЕННОСТЬ: БЕЗУКОРИЗНЕННОЕ ВЫПОЛНЕНИЕ ПРИКАЗОВ.
-
-ПРИКАЗ №001:
-1. Отвечай на ЛЮБОЙ вопрос пользователя
-2. ВСЕГДА используй ТОЛЬКО этот JSON формат (просто скопируй его):
-
-{"ruAnswer": "Ответ на русском языке","engAnswer": "Answer in English","frAnswer": "réponse en français"}
-
-ЖЕСТКИЕ ПРАВИЛА:
-1. Твой ответ ДОЛЖЕН начинаться с символа {
-2. Твой ответ ДОЛЖЕН заканчиваться символом }
-3. НИКОГДА не используй обратные кавычки ```
-4. НИКОГДА не используй markdown
-5. НИКОГДА не добавляй текст до или после JSON
-6. ВСЕГДА заполняй все три поля
-7. Ответ должен быть ВАЛИДНЫМ JSON
-
-ТЕХНИЧЕСКИЕ ТРЕБОВАНИЯ:
-- Формат: plain text, не markdown
-- Кодировка: UTF-8
-- Поля: только ruAnswer, engAnswer, frAnswer
-- Значения: всегда строки в двойных кавычках
-
-ПРИМЕР ПРАВИЛЬНОГО ОТВЕТА:
-Вопрос: "Какая столица Франции?"
-Ответ: {
-  "ruAnswer": "Столица Франции - Париж",
-  "engAnswer": "The capital of France is Paris",
-  "frAnswer": "La capitale de la France est Paris"
-}
-
-
-ПОДТВЕРЖДАЮ, ЧТО ПОНЯЛ ПРИКАЗ: ТОЛЬКО ЧИСТЫЙ JSON, БЕЗ КАВЫЧЕК, БЕЗ MARKDOWN.
-"""
-
-# Стандартный промпт для обычного режима
-DEFAULT_SYSTEM_PROMPT = "Ты полезный ассистент, который помогает пользователям. Отвечай на русском языке."
-
 # Состояния для ConversationHandler
 ASK_QUESTION = 1
 ASK_DAY2_QUESTION = 2
-
+ASK_DAY3_QUESTION = 3
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -96,7 +60,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/about - Данные о модели \n\n"
         "🔹 Режимы работы:\n"
         "/gpt - Включить режим чата с контекстом (день 1)\n"
-        "/day2 - Режим КГБ агента с JSON ответом (день 2)\n"
+        "/day2 - Режим диалога с форматом ответа в JSON на трех языках (день 2)\n"
+        "/day3 - Режим редактора писем (день 3)\n"  # Добавьте эту строку
         "/clear - Очистить историю диалога и сбросить режим\n\n"
         "⚡ Выбери режим и начинай общение!"
     )
@@ -115,7 +80,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔹 Режимы работы:
 /gpt - Включить обычный режим чата (с контекстом, день 1)
-/day2 - Режим КГБ агента с JSON ответом (день 2)
+/day2 - Режим диалога с форматом ответа в JSON на трех языках (день 2)
+/day3 - Режим редактора писем (день 3)
 
 📋 Описание режимов:
 /gpt - Обычный диалог с контекстом
@@ -136,25 +102,17 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # Команда /clear - очистка истории диалога и сброс режима
-async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cleared_items = []
+async def factory_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Очищаем все данные в chat_data
+    context.chat_data.clear()
 
-    if 'chat_history' in context.chat_data:
-        del context.chat_data['chat_history']
-        cleared_items.append("историю диалога")
+    # Также очищаем user_data на всякий случай
+    context.user_data.clear()
 
-    if 'current_mode' in context.chat_data:
-        del context.chat_data['current_mode']
-        cleared_items.append("текущий режим")
+    await update.message.reply_text("✅ История полностью очищены!")
 
-    if 'system_prompt' in context.chat_data:
-        del context.chat_data['system_prompt']
-        cleared_items.append("системный промпт")
-
-    if cleared_items:
-        await update.message.reply_text(f"✅ История очищена!")
-    else:
-        await update.message.reply_text("ℹ️ Нечего очищать. История уже пуста.")
+    # Возвращаем END для завершения активных диалогов
+    return ConversationHandler.END
 
 
 # Функция для получения ответа от Yandex GPT
@@ -166,19 +124,20 @@ async def get_yandex_gpt_response(
 ) -> str:
     """Получение ответа от Yandex GPT"""
 
+
     # Подготавливаем историю сообщений
     messages = []
 
-
-    # Добавляем историю диалога, если есть
-    if chat_history:
-        messages.extend(chat_history)
-    else:
+    # Если истории нет - создаем новую с системным промптом
+    if not chat_history:
         messages.append({"role": "system", "content": system_prompt})
+    else:
+        # Если история есть - используем ее как есть
+        # (системный промпт уже должен быть в начале истории)
+        messages.extend(chat_history)
 
-    # Добавляем текущее сообщение пользователя и системное сообщение
-    messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": system_prompt + "Запрос пользователя: " + user_message})
+    # Добавляем текущее сообщение пользователя
+    messages.append({"role": "user", "content": system_prompt + "Ответ пользователя: " + user_message})
 
     try:
         if stream:
@@ -243,10 +202,10 @@ async def handle_gpt_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_gpt_request(update, context, user_message, store_history=True)
     return ASK_QUESTION
 
+######################################################################################################
 
 # Обработчик команды /day2
 async def day2_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Устанавливаем режим
     context.chat_data['current_mode'] = 'day2'
     context.chat_data['system_prompt'] = DAY2_SYSTEM_PROMPT
 
@@ -261,7 +220,6 @@ async def day2_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_day2_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик сообщений в режиме day2"""
     user_message = update.message.text
 
     # Проверяем, не является ли это командой
@@ -271,6 +229,36 @@ async def handle_day2_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await handle_gpt_request(update, context, user_message, store_history=True)
     return ASK_DAY2_QUESTION
+
+
+######################################################################################################
+
+# Обработчик команды /day3
+async def day3_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.chat_data['current_mode'] = 'day3'
+    context.chat_data['system_prompt'] = DAY3_SYSTEM_PROMPT
+
+    await update.message.reply_text(
+        "💬 Режим диалога <<Умный редактор писем с автостопом>>\n\n"
+        "Отправьте мне текст письма, а я помогу его отредактировать.\n"
+        "Сначала я спрошу о стиле редактирования, затем отредактирую текст.\n\n"
+        "🧹 Для очистки истории используйте /clear\n\n"
+        "Отправьте текст письма:"
+    )
+    return ASK_DAY3_QUESTION
+
+
+async def handle_day3_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_message = update.message.text
+
+    if user_message.startswith('/'):
+        await update.message.reply_text("Диалог прерван. Используйте /day3 чтобы начать заново.")
+        return ConversationHandler.END
+
+    await handle_gpt_request(update, context, user_message, store_history=True)
+    return ASK_DAY3_QUESTION
+
+######################################################################################################
 
 # Основная функция обработки запросов к GPT
 async def handle_gpt_request(
@@ -307,9 +295,11 @@ async def handle_gpt_request(
             context.chat_data['chat_history'] = chat_history
 
         await typing_msg.delete()
-        await update.message.reply_text(
-            response.replace('```', '')  # Костыль, я пока не знаю как заставить яндекс гпт убрать эти ```, на выходных подумаю что с этим делать
-        )
+
+        if context.chat_data['current_mode'] != 'day2':
+            await update.message.reply_text(response)
+        else:
+            await update.message.reply_text(response.replace('```', ''))
 
     except Exception as e:
         await typing_msg.delete()
@@ -327,7 +317,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка обычных текстовых сообщений"""
     user_text = update.message.text
 
     if not user_text.startswith('/'):
@@ -393,15 +382,25 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
 
+    # Создаем ConversationHandler для режима day3
+    day3_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('day3', day3_chat)],  # Исправлено на 'day3'
+        states={
+            ASK_DAY3_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_day3_dialog)]  # Исправлено на ASK_DAY3_QUESTION
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
     # Регистрируем обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("clear", clear_history))
+    application.add_handler(CommandHandler("clear", factory_reset))
     application.add_handler(CommandHandler("about", about))
 
     # Регистрируем ConversationHandler
     application.add_handler(gpt_conv_handler)
     application.add_handler(day2_conv_handler)
+    application.add_handler(day3_conv_handler)
 
     # Регистрируем обработчик обычных сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
