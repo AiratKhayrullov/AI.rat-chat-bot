@@ -28,15 +28,6 @@ YANDEX_CLOUD_MODEL = os.getenv('YANDEX_CLOUD_MODEL')
 MAX_TOKENS = int(os.getenv('MAX_TOKENS'))
 TEMPERATURE = float(os.getenv('TEMPERATURE'))
 
-# Проверка конфигурации
-if not all([TELEGRAM_BOT_TOKEN, YANDEX_CLOUD_FOLDER, YANDEX_CLOUD_API_KEY]):
-    missing = []
-    if not TELEGRAM_BOT_TOKEN: missing.append("TELEGRAM_BOT_TOKEN")
-    if not YANDEX_CLOUD_FOLDER: missing.append("YANDEX_CLOUD_FOLDER")
-    if not YANDEX_CLOUD_API_KEY: missing.append("YANDEX_CLOUD_API_KEY")
-    logger.error(f"Отсутствуют обязательные переменные: {', '.join(missing)}")
-    exit(1)
-
 # Инициализация клиента Yandex GPT
 yandex_client = openai.OpenAI(
     api_key=YANDEX_CLOUD_API_KEY,
@@ -45,9 +36,12 @@ yandex_client = openai.OpenAI(
 )
 
 # Состояния для ConversationHandler
-ASK_QUESTION = 1
-ASK_DAY2_QUESTION = 2
-ASK_DAY3_QUESTION = 3
+DAY_1_STATE = 1
+DAY_2_STATE = 2
+DAY_3_STATE = 3
+
+######################################################################################################
+######################################################################################################
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -59,7 +53,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help - Показать справку\n"
         "/about - Данные о модели \n\n"
         "🔹 Режимы работы:\n"
-        "/gpt - Включить режим чата с контекстом (день 1)\n"
+        "/day1 - Включить режим чата с контекстом (день 1)\n"
         "/day2 - Режим диалога с форматом ответа в JSON на трех языках (день 2)\n"
         "/day3 - Режим редактора писем (день 3)\n"  # Добавьте эту строку
         "/clear - Очистить историю диалога и сбросить режим\n\n"
@@ -79,12 +73,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /clear - Очистить историю диалога и сбросить режим
 
 🔹 Режимы работы:
-/gpt - Включить обычный режим чата (с контекстом, день 1)
+/day1 - Включить обычный режим чата (с контекстом, день 1)
 /day2 - Режим диалога с форматом ответа в JSON на трех языках (день 2)
 /day3 - Режим редактора писем (день 3)
 
 📋 Описание режимов:
-/gpt - Обычный диалог с контекстом
+/day1 - Обычный диалог с контекстом
 /day2 - Бот отвечает только в формате JSON с тремя языками с контекстом
     """
     await update.message.reply_text(help_text)
@@ -114,71 +108,41 @@ async def factory_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Возвращаем END для завершения активных диалогов
     return ConversationHandler.END
 
+######################################################################################################
+######################################################################################################
 
-# Функция для получения ответа от Yandex GPT
-async def get_yandex_gpt_response(
-        user_message: str,
-        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-        chat_history: Optional[list] = None,
-        stream: bool = False
-) -> str:
-    """Получение ответа от Yandex GPT"""
+async def handle_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str, next_state: int):
+    user_message = update.message.text
 
+    # Проверяем, не является ли это командой
+    if user_message.startswith('/'):
+        await update.message.reply_text(
+            f"Диалог прерван. Используйте {command} чтобы начать заново."
+        )
+        return ConversationHandler.END
 
-    # Подготавливаем историю сообщений
-    messages = []
+    await handle_gpt_request(update, context, user_message, store_history=True)
+    return next_state
 
-    # Если истории нет - создаем новую с системным промптом
-    if not chat_history:
-        messages.append({"role": "system", "content": system_prompt})
-    else:
-        # Если история есть - используем ее как есть
-        # (системный промпт уже должен быть в начале истории)
-        messages.extend(chat_history)
-
-    # Добавляем текущее сообщение пользователя
-    messages.append({"role": "user", "content": system_prompt + "Ответ пользователя: " + user_message})
-
-    try:
-        if stream:
-            # Потоковый ответ
-            response = yandex_client.chat.completions.create(
-                model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
-                messages=messages,
-                max_tokens=MAX_TOKENS,
-                temperature=TEMPERATURE,
-                stream=True
-            )
-
-            # Собираем потоковый ответ
-            full_response = ""
-            for chunk in response:
-                if chunk.choices[0].delta.content is not None:
-                    chunk_text = chunk.choices[0].delta.content
-                    full_response += chunk_text
-
-            return full_response
-        else:
-            # Обычный ответ
-            response = yandex_client.chat.completions.create(
-                model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
-                messages=messages,
-                max_tokens=MAX_TOKENS,
-                temperature=TEMPERATURE,
-                stream=False
-            )
-
-            return response.choices[0].message.content
-
-    except Exception as e:
-        logger.error(f"Ошибка при запросе к Yandex GPT: {e}")
-        raise
+# Теперь отдельные обработчики просто вызывают универсальную функцию:
+async def handle_day1_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await handle_dialog(update, context, '/day1', DAY_1_STATE)
 
 
-# Обработчик команды /gpt
-async def gpt_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_day2_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await handle_dialog(update, context, '/day2', DAY_2_STATE)
+
+
+async def handle_day3_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await handle_dialog(update, context, '/day3', DAY_3_STATE)
+
+######################################################################################################
+######################################################################################################
+
+# Обработчик команды /day1
+async def day1_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Устанавливаем режим
-    context.chat_data['current_mode'] = 'gpt'
+    context.chat_data['current_mode'] = 'day1'
     context.chat_data['system_prompt'] = DEFAULT_SYSTEM_PROMPT
 
     await update.message.reply_text(
@@ -188,21 +152,7 @@ async def gpt_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧹 Для очистки истории используйте /clear\n\n"
         "Задайте ваш вопрос:"
     )
-    return ASK_QUESTION
-
-
-async def handle_gpt_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
-
-    # Проверяем, не является ли это командой
-    if user_message.startswith('/'):
-        await update.message.reply_text("Диалог прерван. Используйте /gpt чтобы начать заново.")
-        return ConversationHandler.END
-
-    await handle_gpt_request(update, context, user_message, store_history=True)
-    return ASK_QUESTION
-
-######################################################################################################
+    return DAY_1_STATE
 
 # Обработчик команды /day2
 async def day2_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -216,22 +166,7 @@ async def day2_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧹 Для очистки истории используйте /clear\n\n"
         "Задайте ваш вопрос:"
     )
-    return ASK_DAY2_QUESTION
-
-
-async def handle_day2_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
-
-    # Проверяем, не является ли это командой
-    if user_message.startswith('/'):
-        await update.message.reply_text("Диалог прерван. Используйте /day2 чтобы начать заново.")
-        return ConversationHandler.END
-
-    await handle_gpt_request(update, context, user_message, store_history=True)
-    return ASK_DAY2_QUESTION
-
-
-######################################################################################################
+    return DAY_2_STATE
 
 # Обработчик команды /day3
 async def day3_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -245,19 +180,48 @@ async def day3_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧹 Для очистки истории используйте /clear\n\n"
         "Отправьте текст письма:"
     )
-    return ASK_DAY3_QUESTION
+    return DAY_3_STATE
+
+######################################################################################################
+######################################################################################################
+
+# Функция для получения ответа от Yandex GPT
+async def get_yandex_gpt_response(
+        user_message: str,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        chat_history: Optional[list] = None,
+) -> str:
+    # Подготавливаем историю сообщений
+    messages = []
+
+    # Если истории нет - создаем новую с системным промптом
+    if not chat_history:
+        messages.append({"role": "system", "content": system_prompt})
+    else:
+        # Если история есть - используем ее как есть
+        # (системный промпт уже должен быть в начале истории)
+        messages.extend(chat_history)
+
+    # Добавляем текущее сообщение пользователя
+    messages.append({"role": "user", "content": user_message})
+
+    try:
+        # Обычный ответ
+        response = yandex_client.chat.completions.create(
+            model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
+            messages=messages,
+            max_tokens=MAX_TOKENS,
+            temperature=TEMPERATURE,
+            stream=False
+        )
+
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Ошибка при запросе к Yandex GPT: {e}")
+        raise
 
 
-async def handle_day3_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
-
-    if user_message.startswith('/'):
-        await update.message.reply_text("Диалог прерван. Используйте /day3 чтобы начать заново.")
-        return ConversationHandler.END
-
-    await handle_gpt_request(update, context, user_message, store_history=True)
-    return ASK_DAY3_QUESTION
-
+######################################################################################################
 ######################################################################################################
 
 # Основная функция обработки запросов к GPT
@@ -289,8 +253,8 @@ async def handle_gpt_request(
             chat_history.append({"role": "user", "content": user_message})
             chat_history.append({"role": "assistant", "content": response})
 
-            if len(chat_history) > 20:
-                chat_history = chat_history[-20:]
+            if len(chat_history) > 50:
+                chat_history = chat_history[-50:]
 
             context.chat_data['chat_history'] = chat_history
 
@@ -323,7 +287,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Сообщение от {update.effective_user.id}: {user_text}")
         await update.message.reply_text(
             "🤖 Выберите режим работы:\n\n"
-            "🔹 /gpt - Обычный диалог\n"
+            "🔹 /day1 - Обычный диалог\n"
             "🔹 /day2 - Диалог с JSON ответом\n"
             "🔹 /help - Справка по командам"
         )
@@ -365,10 +329,10 @@ def main():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Создаем ConversationHandler для обычного режима
-    gpt_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('gpt', gpt_chat)],
+    day1_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('day1', day1_chat)],
         states={
-            ASK_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_gpt_dialog)]
+            DAY_1_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_day1_dialog)]
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
@@ -377,7 +341,7 @@ def main():
     day2_conv_handler = ConversationHandler(
         entry_points=[CommandHandler('day2', day2_chat)],
         states={
-            ASK_DAY2_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_day2_dialog)]
+            DAY_2_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_day2_dialog)]
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
@@ -386,7 +350,7 @@ def main():
     day3_conv_handler = ConversationHandler(
         entry_points=[CommandHandler('day3', day3_chat)],  # Исправлено на 'day3'
         states={
-            ASK_DAY3_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_day3_dialog)]  # Исправлено на ASK_DAY3_QUESTION
+            DAY_3_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_day3_dialog)]  # Исправлено на ASK_DAY3_QUESTION
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
@@ -398,7 +362,7 @@ def main():
     application.add_handler(CommandHandler("about", about))
 
     # Регистрируем ConversationHandler
-    application.add_handler(gpt_conv_handler)
+    application.add_handler(day1_conv_handler)
     application.add_handler(day2_conv_handler)
     application.add_handler(day3_conv_handler)
 
