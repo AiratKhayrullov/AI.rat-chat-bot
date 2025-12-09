@@ -1,6 +1,7 @@
 import logging
 import os
 import openai
+import time
 from typing import Optional
 from dotenv import load_dotenv
 from telegram import Update
@@ -19,6 +20,27 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+YANDEX_MODELS = [
+    "yandexgpt-lite/latest", # YandexGPT 5 Lite
+    "yandexgpt/latest", # YandexGPT 5 Pro
+    "yandexgpt/rc", # YandexGPT 5.1 Pro
+    "aliceai-llm/latest", # Alice AI LLM
+]
+
+MODEL_NAMES = {
+    "yandexgpt-lite/latest": "YandexGPT 5 Lite",
+    "yandexgpt/latest": "YandexGPT 5 Pro",
+    "yandexgpt/rc": "YandexGPT 5.1 Pro",
+    "aliceai-llm/latest": "Alice AI LLM",
+}
+
+MODEL_PRICES = {
+    "yandexgpt-lite/latest": {"input":0.10, "output": 0.10},    # 0,10 ₽ за 1K токенов
+    "yandexgpt/latest": {"input": 0.60, "output": 0.60},    # 0,60 ₽ за 1K токенов
+    "yandexgpt/rc": {"input": 0.20, "output": 0.20},    # 0,20 ₽ за 1K токенов
+    "aliceai-llm/latest": {"input": 0.25, "output": 1.00},  # 0,25 ₽ ввод, 1,00 ₽ вывод
+}
 
 # Конфигурация
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -55,7 +77,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 Режимы работы:\n"
         "/day1 - Включить режим чата с контекстом (день 1)\n"
         "/day2 - Режим диалога с форматом ответа в JSON на трех языках (день 2)\n"
-        "/day3 - Режим редактора писем (день 3)\n"  # Добавьте эту строку
+        "/day3 - Режим редактора писем (день 3)\n"
+        "/test_models - Тестирование моделей (день 7)\n"  # Добавлена новая команда
         "/clear - Очистить историю диалога и сбросить режим\n\n"
         "⚡ Выбери режим и начинай общение!"
     )
@@ -80,6 +103,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📋 Описание режимов:
 /day1 - Обычный диалог с контекстом
 /day2 - Бот отвечает только в формате JSON с тремя языками с контекстом
+/day3 - Редактор писем с автостопом
+/test_models - Сравнение разных моделей Yandex GPT
     """
     await update.message.reply_text(help_text)
 
@@ -107,6 +132,196 @@ async def factory_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Возвращаем END для завершения активных диалогов
     return ConversationHandler.END
+
+
+######################################################################################################
+######################################################################################################
+
+async def test_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    test_prompt = "Объясни, что такое квантовая запутанность, простыми словами. Приведи аналогию из повседневной жизни."
+
+    await update.message.reply_text(
+        "🧪 Начинаю тестирование разных моделей Yandex GPT...\n"
+        f"Тестовый промпт: '{test_prompt}'\n\n"
+        f"Тестирую модели: {', '.join(MODEL_NAMES.values())}\n"
+    )
+
+    results = []
+
+    for model_name in YANDEX_MODELS:
+        try:
+            await update.message.reply_text(f"🚀 Тестирую модель: {MODEL_NAMES[model_name]}...")
+
+            # Замер времени
+            start_time = time.time()
+
+            logger.info(f"Вызов API: model={model_name}, folder={YANDEX_CLOUD_FOLDER}")
+
+            # Делаем запрос
+            response = yandex_client.chat.completions.create(
+                model=f"gpt://{YANDEX_CLOUD_FOLDER}/{model_name}",
+                messages=[
+                    {"role": "system", "content": "Ты полезный ассистент"},
+                    {"role": "user", "content": test_prompt}
+                ],
+                max_tokens=MAX_TOKENS,
+                temperature=TEMPERATURE
+            )
+
+            end_time = time.time()
+            response_time = end_time - start_time
+
+            # Получаем информацию о токенах
+            completion = response
+            input_tokens = completion.usage.prompt_tokens
+            output_tokens = completion.usage.completion_tokens
+            total_tokens = completion.usage.total_tokens
+
+            # Рассчитываем стоимость
+            price_info = MODEL_PRICES.get(model_name, {"input": 0, "output": 0})
+            cost = (input_tokens * price_info["input"] / 1000) + (output_tokens * price_info["output"] / 1000)
+
+            result = {
+                "model": model_name,
+                "model_display_name": MODEL_NAMES[model_name],
+                "time": response_time,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+                "cost": cost,
+                "response": completion.choices[0].message.content[:MAX_TOKENS] + "..." if len(
+                    completion.choices[0].message.content) > MAX_TOKENS else completion.choices[0].message.content
+            }
+
+            results.append(result)
+
+            # Отправляем промежуточный результат
+            await update.message.reply_text(
+                f"✅ Модель: {MODEL_NAMES[model_name]}\n"
+                f"⏱ Время: {response_time:.2f} сек\n"
+                f"🔢 Токены: {input_tokens}(вх) + {output_tokens}(вых) = {total_tokens}\n"
+                f"💰 Стоимость: {cost:.6f} ₽\n"
+                f"📝 Ответ:\n{result['response']}"
+            )
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка при тестировании модели {MODEL_NAMES[model_name]}: {str(e)}")
+            results.append({
+                "model": model_name,
+                "model_display_name": MODEL_NAMES[model_name],
+                "error": str(e)
+            })
+
+    # Сравниваем результаты
+    await update.message.reply_text("📊 ИТОГОВОЕ СРАВНЕНИЕ МОДЕЛЕЙ:")
+
+    comparison_text = "🔍 Сравнение по времени:\n"
+    for result in sorted(results, key=lambda x: x.get('time', 999)):
+        if 'error' not in result:
+            comparison_text += f"• {result['model_display_name']}: {result['time']:.2f} сек\n"
+
+    comparison_text += "\n🔢 Сравнение по токенам:\n"
+    for result in sorted(results, key=lambda x: x.get('total_tokens', 999)):
+        if 'error' not in result:
+            comparison_text += f"• {result['model_display_name']}: {result['total_tokens']} токенов\n"
+
+    comparison_text += "\n💰 Сравнение по стоимости:\n"
+    for result in sorted(results, key=lambda x: x.get('cost', 999)):
+        if 'error' not in result:
+            # Форматируем стоимость для красивого отображения в Telegram
+            if result['cost'] < 0.001:
+                cost_display = f"{result['cost']:.8f}".rstrip('0').rstrip('.') + " ₽"
+            elif result['cost'] < 0.01:
+                cost_display = f"{result['cost']:.6f}".rstrip('0').rstrip('.') + " ₽"
+            elif result['cost'] < 0.1:
+                cost_display = f"{result['cost']:.4f}".rstrip('0').rstrip('.') + " ₽"
+            elif result['cost'] < 1:
+                cost_display = f"{result['cost']:.3f}".rstrip('0').rstrip('.') + " ₽"
+            else:
+                cost_display = f"{result['cost']:.2f} ₽"
+
+            comparison_text += f"• {result['model_display_name']}: {cost_display}\n"
+
+    await update.message.reply_text(comparison_text)
+
+    # Отправляем данные в AI для анализа
+    await send_to_ai_for_analysis(update, results)
+
+
+async def send_to_ai_for_analysis(update: Update, results: list):
+
+    # Формируем промпт для анализа
+    analysis_prompt = """
+    Проанализируйте результаты тестирования разных моделей Yandex GPT по следующим параметрам:
+    1. Время ответа
+    2. Количество токенов (входных, выходных, общих)
+    3. Стоимость выполнения запроса (не одного токена, а всю сумму итоговую)
+    4. Качество ответов
+
+    Выведите сравнительный анализ и рекомендации по выбору модели для разных сценариев использования.
+
+    Результаты тестирования:
+    """
+
+    for result in results:
+        if 'error' not in result:
+
+            # Форматируем стоимость для лучшей читаемости
+            if result['cost'] < 0.001:
+                cost_display = f"{result['cost']:.8f}".rstrip('0').rstrip('.') + " ₽"
+            elif result['cost'] < 0.01:
+                cost_display = f"{result['cost']:.6f}".rstrip('0').rstrip('.') + " ₽"
+            else:
+                cost_display = f"{result['cost']:.4f}".rstrip('0').rstrip('.') + " ₽"
+            analysis_prompt += f"""
+            Модель: {result['model_display_name']}
+            • Время ответа: {result['time']:.2f} секунд
+            • Токены: входные={result['input_tokens']}, выходные={result['output_tokens']}, всего={result['total_tokens']}
+            • Стоимость: {cost_display}
+            • Ответ: {result['response']}
+            """
+        else:
+            analysis_prompt += f"""
+            Модель: {result['model_display_name']}
+            • ОШИБКА: {result['error']}
+            """
+
+    analysis_prompt += """
+    Проанализируйте и предоставьте:
+    1. Рейтинг моделей по скорости
+    2. Рейтинг моделей по экономичности (не одного токена, а всю сумму итоговую)
+    3. Рейтинг моделей по качеству ответов (на основе содержания ответов)
+    4. Общие рекомендации для разных use-cases
+
+    Предоставьте ответ в структурированном виде с обоснованием.
+    """
+
+    await update.message.reply_text("🤖 Запрашиваю анализ результатов у AI...")
+
+    try:
+        # Используем основную модель для анализа
+        response = yandex_client.chat.completions.create(
+            model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
+            messages=[
+                {"role": "system",
+                 "content": "Ты опытный аналитик в области ИИ. Ты анализируешь результаты тестирования моделей и даешь профессиональные рекомендации."},
+                {"role": "user", "content": analysis_prompt}
+            ],
+            max_tokens=2000,
+            temperature=0.7
+        )
+
+        analysis_result = response.choices[0].message.content
+
+        await update.message.reply_text(
+            "📈 РЕЗУЛЬТАТЫ АНАЛИЗА AI:\n\n" + analysis_result
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка при анализе результатов: {e}")
+        await update.message.reply_text(
+            f"⚠️ Не удалось получить анализ от AI: {str(e)}"
+        )
 
 ######################################################################################################
 ######################################################################################################
@@ -289,9 +504,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🤖 Выберите режим работы:\n\n"
             "🔹 /day1 - Обычный диалог\n"
             "🔹 /day2 - Диалог с JSON ответом\n"
+            "🔹 /test_models - Тестирование моделей\n"  # Добавлена новая команда
             "🔹 /help - Справка по командам"
         )
-
 
 
 # Обработка ошибок
@@ -350,7 +565,7 @@ def main():
     day3_conv_handler = ConversationHandler(
         entry_points=[CommandHandler('day3', day3_chat)],  # Исправлено на 'day3'
         states={
-            DAY_3_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_day3_dialog)]  # Исправлено на ASK_DAY3_QUESTION
+            DAY_3_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_day3_dialog)]
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
@@ -360,6 +575,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("clear", factory_reset))
     application.add_handler(CommandHandler("about", about))
+    application.add_handler(CommandHandler("test_models", test_models))  # Добавлена новая команда
 
     # Регистрируем ConversationHandler
     application.add_handler(day1_conv_handler)
