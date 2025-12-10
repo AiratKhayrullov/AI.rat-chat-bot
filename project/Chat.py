@@ -1,4 +1,5 @@
 import logging
+from typing import List, Dict, Any
 import os
 import openai
 import time
@@ -10,6 +11,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from project.Promts import DEFAULT_SYSTEM_PROMPT
 from project.Promts import DAY2_SYSTEM_PROMPT
 from project.Promts import DAY3_SYSTEM_PROMPT
+from project.TestCasesForDay8 import test_cases
 
 # Загружаем переменные из .env файла
 load_dotenv()
@@ -78,7 +80,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/day1 - Включить режим чата с контекстом (день 1)\n"
         "/day2 - Режим диалога с форматом ответа в JSON на трех языках (день 2)\n"
         "/day3 - Режим редактора писем (день 3)\n"
-        "/test_models - Тестирование моделей (день 7)\n"  # Добавлена новая команда
+        "/test_models - Тестирование моделей (день 7)\n"
+        "/test_tokens - Тестирование токенов (день 8)\n"
         "/clear - Очистить историю диалога и сбросить режим\n\n"
         "⚡ Выбери режим и начинай общение!"
     )
@@ -105,6 +108,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /day2 - Бот отвечает только в формате JSON с тремя языками с контекстом
 /day3 - Редактор писем с автостопом
 /test_models - Сравнение разных моделей Yandex GPT
+/test_tokens - Сравнительной анализ токенов
     """
     await update.message.reply_text(help_text)
 
@@ -133,6 +137,190 @@ async def factory_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Возвращаем END для завершения активных диалогов
     return ConversationHandler.END
 
+
+######################################################################################################
+######################################################################################################
+
+async def test_token_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🧪 Начинаю тестирование использования токенов...")
+
+    results: List[Dict[str, Any]] = []
+    data_for_analytics = []
+
+    for test_case in test_cases:
+        try:
+            await update.message.reply_text(f"\n{test_case['name']}\nОписание: {test_case['description']}")
+
+            # Замер времени
+            start_time = time.time()
+
+            # Подготавливаем сообщения
+            messages = [
+                {"role": "system", "content": "Ты полезный ассистент"},
+                {"role": "user", "content": test_case['prompt']}
+            ]
+
+            response = yandex_client.chat.completions.create(
+                model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
+                messages=messages,
+                max_tokens=MAX_TOKENS,
+                temperature=TEMPERATURE
+            )
+
+            end_time = time.time()
+            response_time = end_time - start_time
+
+            # Получаем информацию о токенах из ответа API
+            completion = response
+            input_tokens = completion.usage.prompt_tokens
+            output_tokens = completion.usage.completion_tokens
+            total_tokens = completion.usage.total_tokens
+
+            # Проверяем, был ли ответ обрезан
+            response_text = completion.choices[0].message.content
+            was_truncated = response.choices[0].finish_reason == "length"
+
+            # Рассчитываем процент использования лимита
+            limit_usage_percent = (output_tokens / MAX_TOKENS) * 100
+
+            # Рассчитываем стоимость
+            price_info = MODEL_PRICES.get("yandexgpt/latest")
+            cost = (input_tokens * price_info["input"] / 1000) + (output_tokens * price_info["output"] / 1000)
+
+            result = {
+                "name": test_case['name'],
+                "description": test_case['description'],
+                "success": True,
+                "response_time": response_time,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+                "limit_usage_percent": limit_usage_percent,
+                "was_truncated": was_truncated,
+                "cost": cost,
+                "response_preview": response_text[:200] + "..." if len(response_text) > 200 else response_text,
+                "max_tokens_limit": MAX_TOKENS
+            }
+
+
+            results.append(result)
+
+            status_emoji = "⚠️" if result['was_truncated'] else "✅"
+
+            await update.message.reply_text(
+                f"{status_emoji} Результат:\n"
+                f"⏱ Время: {result['response_time']:.2f} сек\n"
+                f"🔢 Токены запроса: {result['input_tokens']}\n"
+                f"🔢 Токены ответа: {result['output_tokens']}\n"
+                f"🔢 Всего токенов: {result['total_tokens']}\n"
+                f"💰 Стоимость: {cost:.6f} ₽\n"
+                f"📊 Использование лимита: {result['limit_usage_percent']:.1f}%\n"
+                f"{'⚠️ Ответ был обрезан' if result['was_truncated'] else '✅ Ответ полный'}\n"
+                f"📝 Предпросмотр ответа:\n{result['response_preview']}"
+            )
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Критическая ошибка при выполнении теста: {str(e)}")
+
+    # Анализ и сравнение результатов
+    await update.message.reply_text("\n📊 СРАВНИТЕЛЬНЫЙ АНАЛИЗ РЕЗУЛЬТАТОВ:")
+
+    analysis_text = "🔍 Выводы по тестированию токенов:\n\n"
+
+    # Анализируем каждый тест
+    for i, result in enumerate(results):
+        analysis_text += f"{result['name']}:\n"
+
+        analysis_text += (
+            f"  • Токены: {result['input_tokens']} (вх) + {result['output_tokens']} (вых) = {result['total_tokens']}\n"
+            f"  • Время: {result['response_time']:.2f} сек\n"
+            f"  • Использование лимита: {result['limit_usage_percent']:.1f}%\n"
+            f"  • Стоимость: {result['cost']:.6f} ₽\n"
+            f"  • Статус: {'⚠️ Обрезан' if result['was_truncated'] else '✅ Полный'}\n"
+        )
+
+        analysis_text += "\n"
+
+
+    await update.message.reply_text(analysis_text)
+
+    await update.message.reply_text("\n🤖 ЗАПРАШИВАЮ ГЛУБОКИЙ АНАЛИЗ У МОДЕЛИ...")
+
+    try:
+        ai_analysis = await perform_ai_analysis(analysis_text)
+        await update.message.reply_text(f"📊 РЕЗУЛЬТАТЫ АНАЛИЗА МОДЕЛЬЮ:\n\n{ai_analysis}")
+    except Exception as e:
+        logger.error(f"Ошибка при анализе моделью: {e}")
+        await update.message.reply_text(f"⚠️ Не удалось получить анализ от модели: {str(e)}")
+
+
+async def perform_ai_analysis(analysis_text: str) -> str:
+
+    # Формируем детальный промпт для анализа
+    analysis_prompt = """Ты - эксперт по языковым моделям. Проанализируй результаты тестирования работы с токенами.
+
+ДАННЫЕ ТЕСТА:
+Были протестированы 3 типа запросов:
+1. Короткий запрос
+2. Средний запрос
+3. Длинный запрос
+
+ЛИМИТ МОДЕЛИ: {max_tokens} токенов
+
+РЕЗУЛЬТАТЫ:
+{test_results}
+
+Выполни глубокий анализ на основе вышеизложенных данных о том, как меняется поведение модели в зависимости от токенов
+
+""".format(
+        max_tokens=MAX_TOKENS,
+        test_results= analysis_text
+    )
+
+    try:
+        response = yandex_client.chat.completions.create(
+            model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """Ты опытный AI-инженер и исследователь языковых моделей. 
+Ты специализируешься на оптимизации использования токенов и анализе производительности LLM.
+Твоя задача - предоставить глубокий, практический анализ с конкретными рекомендациями."""
+                },
+                {"role": "user", "content": analysis_prompt}
+            ],
+            max_tokens=5000,
+            temperature=0.7
+        )
+
+        return response.choices[0].message.content
+
+    except Exception as e:
+        raise Exception(f"Ошибка при анализе моделью: {str(e)}")
+
+
+def format_test_results_for_analysis(results: List[Dict[str, Any]]) -> str:
+    """Форматирует результаты тестирования для анализа моделью"""
+
+    formatted = ""
+
+    for result in results:
+        formatted += f"ТЕСТ: {result['name']}\n"
+        formatted += f"Описание: {result['description']}\n"
+        formatted += f"Статус: {'УСПЕХ' if result.get('success', False) else 'ОШИБКА'}\n"
+
+        formatted += f"\nМЕТРИКИ:\n"
+        formatted += f"• Время ответа: {result['response_time']:.2f} сек\n"
+        formatted += f"• Токены запроса: {result['input_tokens']}\n"
+        formatted += f"• Токены ответа: {result['output_tokens']}\n"
+        formatted += f"• Всего токенов: {result['total_tokens']}\n"
+        formatted += f"• Использование лимита: {result['limit_usage_percent']:.1f}%\n"
+        formatted += f"• Ответ обрезан: {'ДА' if result['was_truncated'] else 'НЕТ'}\n"
+        formatted += f"• Причина завершения: {'length (обрезка)' if result['was_truncated'] else 'stop (полный)'}\n"
+
+        formatted += f"\nОТВЕТ: {result['input_tokens']}\n"
+
+    return formatted
 
 ######################################################################################################
 ######################################################################################################
@@ -226,21 +414,10 @@ async def test_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
             comparison_text += f"• {result['model_display_name']}: {result['total_tokens']} токенов\n"
 
     comparison_text += "\n💰 Сравнение по стоимости:\n"
-    for result in sorted(results, key=lambda x: x.get('cost', 999)):
-        if 'error' not in result:
-            # Форматируем стоимость для красивого отображения в Telegram
-            if result['cost'] < 0.001:
-                cost_display = f"{result['cost']:.8f}".rstrip('0').rstrip('.') + " ₽"
-            elif result['cost'] < 0.01:
-                cost_display = f"{result['cost']:.6f}".rstrip('0').rstrip('.') + " ₽"
-            elif result['cost'] < 0.1:
-                cost_display = f"{result['cost']:.4f}".rstrip('0').rstrip('.') + " ₽"
-            elif result['cost'] < 1:
-                cost_display = f"{result['cost']:.3f}".rstrip('0').rstrip('.') + " ₽"
-            else:
-                cost_display = f"{result['cost']:.2f} ₽"
 
-            comparison_text += f"• {result['model_display_name']}: {cost_display}\n"
+    for result in sorted(results, key=lambda x: x.get('cost', 999)):
+        cost_display = f"{result['cost']:.3f}".rstrip('0').rstrip('.') + " ₽"
+        comparison_text += f"• {result['model_display_name']}: {cost_display}\n"
 
     await update.message.reply_text(comparison_text)
 
@@ -576,6 +753,7 @@ def main():
     application.add_handler(CommandHandler("clear", factory_reset))
     application.add_handler(CommandHandler("about", about))
     application.add_handler(CommandHandler("test_models", test_models))  # Добавлена новая команда
+    application.add_handler(CommandHandler("test_tokens", test_token_usage))
 
     # Регистрируем ConversationHandler
     application.add_handler(day1_conv_handler)
