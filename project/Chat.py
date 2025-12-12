@@ -80,8 +80,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/day1 - Включить режим чата с контекстом (день 1)\n"
         "/day2 - Режим диалога с форматом ответа в JSON на трех языках (день 2)\n"
         "/day3 - Режим редактора писем (день 3)\n"
+        "📋 Анализ:\n"
         "/test_models - Тестирование моделей (день 7)\n"
         "/test_tokens - Тестирование токенов (день 8)\n"
+        "/compression_stats - Показать статистику сжатия истории диалога (день 9)\n"
         "/clear - Очистить историю диалога и сбросить режим\n\n"
         "⚡ Выбери режим и начинай общение!"
     )
@@ -103,12 +105,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /day2 - Режим диалога с форматом ответа в JSON на трех языках (день 2)
 /day3 - Режим редактора писем (день 3)
 
-📋 Описание режимов:
-/day1 - Обычный диалог с контекстом
-/day2 - Бот отвечает только в формате JSON с тремя языками с контекстом
-/day3 - Редактор писем с автостопом
+📋 Анализ:
 /test_models - Сравнение разных моделей Yandex GPT
 /test_tokens - Сравнительной анализ токенов
+/compression_stats - Показать статистику сжатия истории диалога"
     """
     await update.message.reply_text(help_text)
 
@@ -137,6 +137,192 @@ async def factory_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Возвращаем END для завершения активных диалогов
     return ConversationHandler.END
 
+
+######################################################################################################
+######################################################################################################
+
+# Функция для подсчета токенов (примерная оценка)
+def estimate_tokens(text: str) -> int:
+    """Примерная оценка количества токенов в тексте"""
+    # Примерная оценка: 1 токен ≈ 4 символа для русского текста
+    return len(text) // 4
+
+# Константа для сжатия диалога
+COMPRESSION_THRESHOLD = 10  # Сжимать каждые N сообщений
+
+
+# Функция для сжатия истории диалога
+async def compress_dialog_history(chat_history: List[Dict[str, str]], context: ContextTypes.DEFAULT_TYPE) -> List[
+    Dict[str, str]]:
+    """Сжимает историю диалога, заменяя старые сообщения summary"""
+
+    if len(chat_history) <= COMPRESSION_THRESHOLD:
+        return chat_history
+
+    # Получаем сохраненные summary из контекста
+    compressed_history = context.chat_data.get('compressed_history', [])
+    messages_to_compress = chat_history[len(compressed_history):]
+
+    if len(messages_to_compress) < COMPRESSION_THRESHOLD:
+        # Еще не набралось достаточно сообщений для сжатия
+        return compressed_history + messages_to_compress
+
+    try:
+        # Создаем промпт для суммаризации
+        summary_prompt = """
+        Пожалуйста, создай краткое summary (краткое содержание) следующего диалога.
+        Сохрани ключевые моменты, решения, важные детали и контекст для продолжения беседы.
+        Summary должно быть на русском языке и содержать примерно 100-200 слов.
+
+        Диалог для суммаризации:
+        """
+
+        # Формируем текст для суммаризации
+        dialog_text = ""
+        for msg in messages_to_compress:
+            role = "Пользователь" if msg["role"] == "user" else "Ассистент"
+            dialog_text += f"{role}: {msg['content']}\n\n"
+
+        # Вызываем модель для создания summary
+        response = yandex_client.chat.completions.create(
+            model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
+            messages=[
+                {"role": "system",
+                 "content": "Ты эксперт по суммаризации диалогов. Твоя задача - создавать краткие, информативные summary для продолжения беседы."},
+                {"role": "user", "content": f"{summary_prompt}\n\n{dialog_text}"}
+            ],
+            max_tokens=300,
+            temperature=0.3
+        )
+
+        summary = response.choices[0].message.content
+
+        # Создаем сообщение-summary для истории
+        summary_message = {
+            "role": "system",
+            "content": f"📚 Сжатая история предыдущего диалога (сохранены ключевые моменты):\n{summary}"
+        }
+
+        # Обновляем сжатую историю
+        compressed_history.append(summary_message)
+
+        # Сохраняем последнее сообщение ассистента для контекста
+        if messages_to_compress and messages_to_compress[-1]["role"] == "assistant":
+            compressed_history.append(messages_to_compress[-1])
+
+        # Сохраняем сжатую историю в контексте
+        context.chat_data['compressed_history'] = compressed_history
+
+        # Логируем сжатие
+        logger.info(
+            f"История диалога сжата. Сообщений до сжатия: {len(chat_history)}, после: {len(compressed_history)}")
+
+        return compressed_history
+
+    except Exception as e:
+        logger.error(f"Ошибка при сжатии истории диалога: {e}")
+        # В случае ошибки возвращаем оригинальную историю
+        return chat_history
+
+
+async def check_compression(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_history = context.chat_data.get('chat_history', [])
+    compressed_history = context.chat_data.get('compressed_history', [])
+
+    if not chat_history:
+        await update.message.reply_text("📊 История диалога пуста.")
+        return
+
+    # Подсчитываем примерное количество токенов
+    original_tokens = sum(estimate_tokens(msg["content"]) for msg in chat_history)
+
+    if compressed_history:
+        compressed_tokens = sum(estimate_tokens(msg["content"]) for msg in compressed_history)
+
+        # Добавляем токены системного промпта
+        system_prompt = context.chat_data.get('system_prompt', DEFAULT_SYSTEM_PROMPT)
+        compressed_tokens += estimate_tokens(system_prompt)
+
+        compression_ratio = (1 - compressed_tokens / original_tokens) * 100 if original_tokens > 0 else 0
+
+        stats_text = (
+            f"📊 Статистика сжатия истории:\n\n"
+            f"• Оригинальных сообщений: {len(chat_history)}\n"
+            f"• Сжатых сообщений: {len(compressed_history)}\n"
+            f"• Примерно токенов (оригинал): {original_tokens}\n"
+            f"• Примерно токенов (сжато): {compressed_tokens}\n"
+            f"• Экономия токенов: {compression_ratio:.1f}%\n"
+            f"• Порог сжатия: каждые {COMPRESSION_THRESHOLD} сообщений\n\n"
+            f"════════════════════════════════\n"
+            f"📜 СЖАТАЯ ИСТОРИЯ ДИАЛОГА:\n"
+            f"════════════════════════════════\n"
+        )
+
+        # Добавляем сжатую историю
+        for i, msg in enumerate(compressed_history, 1):
+            role_emoji = "👤" if msg["role"] == "user" else "🤖" if msg["role"] == "assistant" else "📚"
+            role_text = "Пользователь" if msg["role"] == "user" else "Ассистент" if msg["role"] == "assistant" else "Сжатая история"
+
+            # Обрезаем длинные сообщения для отображения
+            content_preview = msg["content"]
+            if len(content_preview) > 300:
+                content_preview = content_preview[:300] + "..."
+
+            stats_text += f"\n{i}. {role_emoji} {role_text}:\n{content_preview}\n"
+            stats_text += f"   └─ Примерно токенов: {estimate_tokens(msg['content'])}\n"
+
+    else:
+        stats_text = (
+            f"📊 История диалога:\n\n"
+            f"• Сообщений: {len(chat_history)}\n"
+            f"• Примерно токенов: {original_tokens}\n"
+            f"• Сжатие еще не применялось\n"
+            f"• Порог сжатия: {COMPRESSION_THRESHOLD} сообщений\n\n"
+            f"📝 Сжатие будет применено после {COMPRESSION_THRESHOLD - len(chat_history)} сообщений\n\n"
+            f"════════════════════════════════\n"
+            f"📜 ОРИГИНАЛЬНАЯ ИСТОРИЯ ДИАЛОГА:\n"
+            f"════════════════════════════════\n"
+        )
+
+        # Добавляем оригинальную историю
+        for i, msg in enumerate(chat_history, 1):
+            role_emoji = "👤" if msg["role"] == "user" else "🤖"
+            role_text = "Пользователь" if msg["role"] == "user" else "Ассистент"
+
+            # Обрезаем длинные сообщения для отображения
+            content_preview = msg["content"]
+            if len(content_preview) > 200:
+                content_preview = content_preview[:200] + "..."
+
+            stats_text += f"\n{i}. {role_emoji} {role_text}:\n{content_preview}\n"
+            stats_text += f"   └─ Примерно токенов: {estimate_tokens(msg['content'])}\n"
+
+    # Разбиваем сообщение на части, если оно слишком длинное
+    max_message_length = 4000  # Лимит Telegram
+    if len(stats_text) > max_message_length:
+        # Разбиваем на части
+        parts = []
+        current_part = ""
+        lines = stats_text.split('\n')
+
+        for line in lines:
+            if len(current_part) + len(line) + 1 > max_message_length:
+                parts.append(current_part)
+                current_part = line + '\n'
+            else:
+                current_part += line + '\n'
+
+        if current_part:
+            parts.append(current_part)
+
+        # Отправляем первую часть с информацией
+        await update.message.reply_text(parts[0])
+
+        # Отправляем остальные части
+        for part in parts[1:]:
+            await update.message.reply_text(part)
+    else:
+        await update.message.reply_text(stats_text)
 
 ######################################################################################################
 ######################################################################################################
@@ -616,14 +802,13 @@ async def get_yandex_gpt_response(
 ######################################################################################################
 ######################################################################################################
 
-# Основная функция обработки запросов к GPT
+# Модифицированная функция handle_gpt_request
 async def handle_gpt_request(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
         user_message: str,
         store_history: bool = False
 ):
-    """Общая функция обработки запросов к GPT"""
     typing_msg = await update.message.reply_text("🤔 Думаю...")
 
     try:
@@ -633,11 +818,26 @@ async def handle_gpt_request(
         # Получаем историю диалога
         chat_history = context.chat_data.get('chat_history', [])
 
+        # Сжимаем историю при необходимости
+        compressed_history = await compress_dialog_history(chat_history, context)
+
+        # Подготавливаем финальную историю для отправки
+        final_history = []
+
+        # Добавляем системный промпт
+        final_history.append({"role": "system", "content": system_prompt})
+
+        # Добавляем сжатую историю
+        final_history.extend(compressed_history)
+
+        # Добавляем текущее сообщение пользователя
+        final_history.append({"role": "user", "content": user_message})
+
         # Получаем ответ
         response = await get_yandex_gpt_response(
             user_message=user_message,
             system_prompt=system_prompt,
-            chat_history=chat_history
+            chat_history=final_history[1:]  # Пропускаем первый системный промпт, т.к. он уже в истории
         )
 
         # Обновляем историю диалога, если нужно
@@ -650,12 +850,19 @@ async def handle_gpt_request(
 
             context.chat_data['chat_history'] = chat_history
 
+        # Добавляем информацию о сжатии в ответ
+        compression_info = ""
+        if 'compressed_history' in context.chat_data:
+            original_count = len(chat_history)
+            compressed_count = len(context.chat_data['compressed_history'])
+            compression_info = f"\n\n🔍 История диалога сжата: {original_count} → {compressed_count} сообщений"
+
         await typing_msg.delete()
 
-        if context.chat_data['current_mode'] != 'day2':
-            await update.message.reply_text(response)
+        if context.chat_data.get('current_mode') != 'day2':
+            await update.message.reply_text(response + compression_info)
         else:
-            await update.message.reply_text(response.replace('```', ''))
+            await update.message.reply_text(response.replace('```', '') + compression_info)
 
     except Exception as e:
         await typing_msg.delete()
@@ -681,7 +888,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🤖 Выберите режим работы:\n\n"
             "🔹 /day1 - Обычный диалог\n"
             "🔹 /day2 - Диалог с JSON ответом\n"
-            "🔹 /test_models - Тестирование моделей\n"  # Добавлена новая команда
+            "🔹 /compression_stats - Показать статистику сжатия истории диалога\n"
+            "🔹 /test_models - Тестирование моделей\n"
             "🔹 /help - Справка по командам"
         )
 
@@ -754,6 +962,7 @@ def main():
     application.add_handler(CommandHandler("about", about))
     application.add_handler(CommandHandler("test_models", test_models))  # Добавлена новая команда
     application.add_handler(CommandHandler("test_tokens", test_token_usage))
+    application.add_handler(CommandHandler("compression_stats", check_compression))
 
     # Регистрируем ConversationHandler
     application.add_handler(day1_conv_handler)
