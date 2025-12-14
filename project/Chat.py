@@ -41,8 +41,11 @@ from project.tg.TelegramHandlers import (
     about,
     factory_reset,
     cancel,
+    storage_command,
     error_handler
 )
+
+from project.StorageManager import storage_manager
 
 # Настраиваем логирование
 logging.basicConfig(**LOGGING_CONFIG)
@@ -54,6 +57,27 @@ yandex_client = openai.OpenAI(
     base_url=YANDEX_API_BASE_URL,
     project=YANDEX_CLOUD_FOLDER
 )
+######################################################################################################
+######################################################################################################
+
+
+async def save_chat_history_to_storage(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Сохраняет текущую историю чата в хранилище
+    """
+    chat_data = {}
+
+    # Собираем все данные чата
+    for key in ['chat_history', 'compressed_history', 'compressed_blocks_count',
+                'system_prompt', 'current_mode']:
+        if key in context.chat_data:
+            chat_data[key] = context.chat_data[key]
+
+    # Сохраняем в JSON
+    storage_manager.save_chat_history(chat_id, chat_data)
+
+
+
 
 ######################################################################################################
 ######################################################################################################
@@ -68,80 +92,93 @@ def estimate_tokens(text: str) -> int:
 # Функция для сжатия истории диалога
 async def compress_dialog_history(chat_history: List[Dict[str, str]], context: ContextTypes.DEFAULT_TYPE) -> List[
     Dict[str, str]]:
-    """Сжимает историю диалога, заменяя старые сообщения summary"""
 
-    if len(chat_history) <= COMPRESSION_THRESHOLD:
-        return chat_history
+    if len(chat_history) < COMPRESSION_THRESHOLD:
+        # Еще недостаточно сообщений для сжатия
+        return []
 
     # Получаем сохраненные summary из контекста
     compressed_history = context.chat_data.get('compressed_history', [])
-    messages_to_compress = chat_history[len(compressed_history):]
+    compressed_blocks_count = context.chat_data.get('compressed_blocks_count', 0)
 
-    if len(messages_to_compress) < COMPRESSION_THRESHOLD:
-        # Еще не набралось достаточно сообщений для сжатия
-        return compressed_history + messages_to_compress
+    # Вычисляем, сколько полных блоков по 10 сообщений есть сейчас
+    current_blocks_count = len(chat_history) // COMPRESSION_THRESHOLD
 
-    try:
-        # Создаем промпт для суммаризации
-        summary_prompt = """
-        Пожалуйста, создай краткое summary (краткое содержание) следующего диалога.
-        Сохрани ключевые моменты, решения, важные детали и контекст для продолжения беседы.
-        Summary должно быть на русском языке и содержать примерно 100-200 слов.
+    # Если есть новые блоки для сжатия
+    if current_blocks_count > compressed_blocks_count:
+        logger.info(f"Есть новые блоки для сжатия: было {compressed_blocks_count}, стало {current_blocks_count}")
 
-        Диалог для суммаризации:
-        """
+        # Сжимаем каждый новый блок
+        for block_num in range(compressed_blocks_count, current_blocks_count):
+            start_idx = block_num * COMPRESSION_THRESHOLD
+            end_idx = (block_num + 1) * COMPRESSION_THRESHOLD
 
-        # Формируем текст для суммаризации
-        dialog_text = ""
-        for msg in messages_to_compress:
-            role = "Пользователь" if msg["role"] == "user" else "Ассистент"
-            dialog_text += f"{role}: {msg['content']}\n\n"
+            # Если это последний блок и в нем меньше 10 сообщений, пропускаем
+            if end_idx > len(chat_history):
+                continue
 
-        # Вызываем модель для создания summary
-        response = yandex_client.chat.completions.create(
-            model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
-            messages=[
-                {"role": "system",
-                 "content": "Ты эксперт по суммаризации диалогов. Твоя задача - создавать краткие, информативные summary для продолжения беседы."},
-                {"role": "user", "content": f"{summary_prompt}\n\n{dialog_text}"}
-            ],
-            max_tokens=300,
-            temperature=0.3
-        )
+            block_to_compress = chat_history[start_idx:end_idx]
 
-        summary = response.choices[0].message.content
+            try:
+                # Создаем промпт для суммаризации
+                summary_prompt = """
+                Пожалуйста, создай краткое summary (краткое содержание) следующего диалога.
+                Сохрани ключевые моменты, решения, важные детали и контекст для продолжения беседы.
+                Summary должно быть на русском языке и содержать примерно 100-200 слов.
 
-        # Создаем сообщение-summary для истории
-        summary_message = {
-            "role": "system",
-            "content": f"📚 Сжатая история предыдущего диалога (сохранены ключевые моменты):\n{summary}"
-        }
+                Диалог для суммаризации:
+                """
 
-        # Обновляем сжатую историю
-        compressed_history.append(summary_message)
+                # Формируем текст для суммаризации
+                dialog_text = ""
+                for msg in block_to_compress:
+                    role = "Пользователь" if msg["role"] == "user" else "Ассистент"
+                    dialog_text += f"{role}: {msg['content']}\n\n"
 
-        # Сохраняем последнее сообщение ассистента для контекста
-        if messages_to_compress and messages_to_compress[-1]["role"] == "assistant":
-            compressed_history.append(messages_to_compress[-1])
+                # Вызываем модель для создания summary
+                response = yandex_client.chat.completions.create(
+                    model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
+                    messages=[
+                        {"role": "system",
+                         "content": "Ты эксперт по суммаризации диалогов. Твоя задача - создавать краткие, информативные summary для продолжения беседы."},
+                        {"role": "user", "content": f"{summary_prompt}\n\n{dialog_text}"}
+                    ],
+                    max_tokens=300,
+                    temperature=0.3
+                )
 
-        # Сохраняем сжатую историю в контексте
+                summary = response.choices[0].message.content
+
+                # Создаем сообщение-summary для истории
+                summary_message = {
+                    "role": "system",
+                    "content": f"📚 Сжатая история диалога (сообщения {start_idx + 1}-{end_idx}):\n{summary}"
+                }
+
+                # Добавляем summary в сжатую историю
+                compressed_history.append(summary_message)
+
+                logger.info(f"Сжат блок {block_num + 1}: сообщения {start_idx + 1}-{end_idx}")
+
+            except Exception as e:
+                logger.error(f"Ошибка при сжатии блока {block_num + 1}: {e}")
+                # В случае ошибки пропускаем этот блок
+                continue
+
+        # Сохраняем сжатую историю и счетчик блоков
         context.chat_data['compressed_history'] = compressed_history
+        context.chat_data['compressed_blocks_count'] = current_blocks_count
 
-        # Логируем сжатие
         logger.info(
-            f"История диалога сжата. Сообщений до сжатия: {len(chat_history)}, после: {len(compressed_history)}")
+            f"Сжатие завершено. Всего блоков: {current_blocks_count}, сжатых сообщений: {len(compressed_history)}")
 
-        return compressed_history
-
-    except Exception as e:
-        logger.error(f"Ошибка при сжатии истории диалога: {e}")
-        # В случае ошибки возвращаем оригинальную историю
-        return chat_history
+    return compressed_history
 
 
 async def check_compression(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_history = context.chat_data.get('chat_history', [])
     compressed_history = context.chat_data.get('compressed_history', [])
+    compressed_blocks_count = context.chat_data.get('compressed_blocks_count', 0)
 
     if not chat_history:
         await update.message.reply_text("📊 История диалога пуста.")
@@ -157,33 +194,55 @@ async def check_compression(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = context.chat_data.get('system_prompt', DEFAULT_SYSTEM_PROMPT)
         compressed_tokens += estimate_tokens(system_prompt)
 
-        compression_ratio = (1 - compressed_tokens / original_tokens) * 100 if original_tokens > 0 else 0
+        # Добавляем токены хвоста (несжатых сообщений)
+        tail_start_idx = compressed_blocks_count * COMPRESSION_THRESHOLD
+        tail_messages = chat_history[tail_start_idx:] if tail_start_idx < len(chat_history) else []
+        tail_tokens = sum(estimate_tokens(msg["content"]) for msg in tail_messages)
+
+        total_compressed_tokens = compressed_tokens + tail_tokens
+
+        compression_ratio = (1 - total_compressed_tokens / original_tokens) * 100 if original_tokens > 0 else 0
 
         stats_text = (
             f"📊 Статистика сжатия истории:\n\n"
-            f"• Оригинальных сообщений: {len(chat_history)}\n"
-            f"• Сжатых сообщений: {len(compressed_history)}\n"
+            f"• Всего сообщений в диалоге: {len(chat_history)}\n"
+            f"• Сжатых блоков (по {COMPRESSION_THRESHOLD} сообщений): {compressed_blocks_count}\n"
+            f"• Несжатых сообщений (хвост): {len(tail_messages)}\n"
             f"• Примерно токенов (оригинал): {original_tokens}\n"
-            f"• Примерно токенов (сжато): {compressed_tokens}\n"
+            f"• Примерно токенов (сжатые блоки): {compressed_tokens}\n"
+            f"• Примерно токенов (хвост): {tail_tokens}\n"
             f"• Экономия токенов: {compression_ratio:.1f}%\n"
             f"• Порог сжатия: каждые {COMPRESSION_THRESHOLD} сообщений\n\n"
             f"════════════════════════════════\n"
-            f"📜 СЖАТАЯ ИСТОРИЯ ДИАЛОГА:\n"
+            f"📜 СТРУКТУРА ДИАЛОГА:\n"
             f"════════════════════════════════\n"
         )
 
-        # Добавляем сжатую историю
-        for i, msg in enumerate(compressed_history, 1):
-            role_emoji = "👤" if msg["role"] == "user" else "🤖" if msg["role"] == "assistant" else "📚"
-            role_text = "Пользователь" if msg["role"] == "user" else "Ассистент" if msg["role"] == "assistant" else "Сжатая история"
+        # Показываем последние сообщения из полной истории
+        recent_count = min(10, len(chat_history))
+        recent_messages = chat_history[-recent_count:]
 
-            # Обрезаем длинные сообщения для отображения
+        stats_text += f"\n📝 Последние {recent_count} сообщений:\n"
+        for i, msg in enumerate(recent_messages, max(1, len(chat_history) - recent_count + 1)):
+            role_emoji = "👤" if msg["role"] == "user" else "🤖"
+            role_text = "Пользователь" if msg["role"] == "user" else "Ассистент"
+
             content_preview = msg["content"]
-            if len(content_preview) > 300:
-                content_preview = content_preview[:300] + "..."
+            if len(content_preview) > 100:
+                content_preview = content_preview[:100] + "..."
 
-            stats_text += f"\n{i}. {role_emoji} {role_text}:\n{content_preview}\n"
-            stats_text += f"   └─ Примерно токенов: {estimate_tokens(msg['content'])}\n"
+            stats_text += f"\n{i}. {role_emoji} {role_text}:\n   {content_preview}\n"
+
+        # Показываем сжатые блоки
+        if compressed_history:
+            stats_text += f"\n📚 Сжатые блоки ({len(compressed_history)}):\n"
+            for i, msg in enumerate(compressed_history, 1):
+                # Извлекаем информацию о блоке
+                content_lines = msg['content'].split('\n')
+                if len(content_lines) > 1:
+                    block_info = content_lines[0]
+                    summary = ' '.join(content_lines[1:])[:120] + "..."
+                    stats_text += f"\n{i}. {block_info}\n   📋 {summary}\n"
 
     else:
         stats_text = (
@@ -194,26 +253,28 @@ async def check_compression(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Порог сжатия: {COMPRESSION_THRESHOLD} сообщений\n\n"
             f"📝 Сжатие будет применено после {COMPRESSION_THRESHOLD - len(chat_history)} сообщений\n\n"
             f"════════════════════════════════\n"
-            f"📜 ОРИГИНАЛЬНАЯ ИСТОРИЯ ДИАЛОГА:\n"
+            f"📜 ПОСЛЕДНИЕ СООБЩЕНИЯ:\n"
             f"════════════════════════════════\n"
         )
 
-        # Добавляем оригинальную историю
-        for i, msg in enumerate(chat_history, 1):
+        recent_count = min(10, len(chat_history))
+        recent_messages = chat_history[-recent_count:] if len(chat_history) > recent_count else chat_history
+
+        for i, msg in enumerate(recent_messages, max(1, len(chat_history) - recent_count + 1)):
             role_emoji = "👤" if msg["role"] == "user" else "🤖"
             role_text = "Пользователь" if msg["role"] == "user" else "Ассистент"
 
-            # Обрезаем длинные сообщения для отображения
             content_preview = msg["content"]
-            if len(content_preview) > 200:
-                content_preview = content_preview[:200] + "..."
+            if len(content_preview) > 100:
+                content_preview = content_preview[:100] + "..."
 
-            stats_text += f"\n{i}. {role_emoji} {role_text}:\n{content_preview}\n"
-            stats_text += f"   └─ Примерно токенов: {estimate_tokens(msg['content'])}\n"
+            stats_text += f"\n{i}. {role_emoji} {role_text}:\n   {content_preview}\n"
+
+        if len(chat_history) > recent_count:
+            stats_text += f"\n... и еще {len(chat_history) - recent_count} сообщений"
 
     # Разбиваем сообщение на части, если оно слишком длинное
     if len(stats_text) > MAX_MESSAGE_LENGTH:
-        # Разбиваем на части
         parts = []
         current_part = ""
         lines = stats_text.split('\n')
@@ -228,10 +289,8 @@ async def check_compression(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if current_part:
             parts.append(current_part)
 
-        # Отправляем первую часть с информацией
         await update.message.reply_text(parts[0])
 
-        # Отправляем остальные части
         for part in parts[1:]:
             await update.message.reply_text(part)
     else:
@@ -244,7 +303,6 @@ async def test_token_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧪 Начинаю тестирование использования токенов...")
 
     results: List[Dict[str, Any]] = []
-    data_for_analytics = []
 
     for test_case in test_cases:
         try:
@@ -718,53 +776,100 @@ async def handle_gpt_request(
         user_message: str,
         store_history: bool = False
 ):
+    chat_id = update.effective_chat.id
     typing_msg = await update.message.reply_text("🤔 Думаю...")
 
     try:
-        # Получаем текущий системный промпт
+        # Загружаем историю из хранилища при первом обращении в этой сессии
+        if 'chat_history' not in context.chat_data:
+            stored_data = storage_manager.load_chat_history(chat_id)
+            if stored_data:
+                # Восстанавливаем состояние из хранилища
+                for key, value in stored_data.items():
+                    context.chat_data[key] = value
+                logger.info(f"📂 Восстановлена история чата {chat_id} из хранилища")
+
+        # Получаем текущий системный промпт (из памяти или по умолчанию)
         system_prompt = context.chat_data.get('system_prompt', DEFAULT_SYSTEM_PROMPT)
 
-        # Получаем историю диалога
+        # Получаем полную историю диалога
         chat_history = context.chat_data.get('chat_history', [])
 
-        # Сжимаем историю при необходимости
+        # Сжимаем историю (если нужно) - получаем все сжатые блоки
         compressed_history = await compress_dialog_history(chat_history, context)
 
-        # Подготавливаем финальную историю для отправки
-        final_history = []
+        # Определяем "хвост" - сообщения, которые еще не попали в сжатые блоки
+        compressed_blocks_count = context.chat_data.get('compressed_blocks_count', 0)
+        tail_start_idx = compressed_blocks_count * COMPRESSION_THRESHOLD
 
-        # Добавляем системный промпт
-        final_history.append({"role": "system", "content": system_prompt})
+        # Получаем хвост (сообщения после последнего сжатого блока)
+        tail_messages = []
+        if tail_start_idx < len(chat_history):
+            tail_messages = chat_history[tail_start_idx:]
 
-        # Добавляем сжатую историю
-        final_history.extend(compressed_history)
+        # Формируем финальный запрос к модели:
+        # 1. Системный промпт
+        # 2. Все сжатые блоки (summary)
+        # 3. Хвост (несжатые сообщения после последнего блока)
+        # 4. Текущий вопрос пользователя
 
-        # Добавляем текущее сообщение пользователя
-        final_history.append({"role": "user", "content": user_message})
+        final_messages = []
 
-        # Получаем ответ
+        # 1. Системный промпт
+        final_messages.append({"role": "system", "content": system_prompt})
+
+        # 2. Все сжатые блоки
+        final_messages.extend(compressed_history)
+
+        # 3. Хвост (если есть) - добавляем сообщения как есть
+        final_messages.extend(tail_messages)
+
+        # 4. Текущий вопрос пользователя
+        final_messages.append({"role": "user", "content": user_message})
+
+        # Логируем, что отправляем
+        logger.info(f"Отправка запроса к модели. Всего сообщений: {len(final_messages)}")
+        logger.info(f"Сжатых блоков: {len(compressed_history)}, хвост: {len(tail_messages)} сообщений")
+
+        # Получаем ответ от модели
         response = await get_yandex_gpt_response(
             user_message=user_message,
             system_prompt=system_prompt,
-            chat_history=final_history[1:]  # Пропускаем первый системный промпт, т.к. он уже в истории
+            chat_history=final_messages[1:]  # Пропускаем первый системный промпт
         )
 
-        # Обновляем историю диалога, если нужно
+        # Обновляем ПОЛНУЮ историю диалога (все сообщения)
+        # Обновляем ПОЛНУЮ историю диалога (все сообщения)
         if store_history:
+            # Добавляем вопрос пользователя
             chat_history.append({"role": "user", "content": user_message})
+            # Добавляем ответ ассистента
             chat_history.append({"role": "assistant", "content": response})
 
+            # Ограничиваем максимальную длину полной истории
             if len(chat_history) > MAX_HISTORY_LENGTH:
                 chat_history = chat_history[-MAX_HISTORY_LENGTH:]
 
+            # Сохраняем обновленную полную историю в память
             context.chat_data['chat_history'] = chat_history
+
+            # Автоматически сохраняем в JSON файл
+            await save_chat_history_to_storage(chat_id, context)
 
         # Добавляем информацию о сжатии в ответ
         compression_info = ""
         if 'compressed_history' in context.chat_data:
-            original_count = len(chat_history)
-            compressed_count = len(context.chat_data['compressed_history'])
-            compression_info = f"\n\n🔍 История диалога сжата: {original_count} → {compressed_count} сообщений"
+            compressed_blocks = context.chat_data.get('compressed_blocks_count', 0)
+            total_messages = len(chat_history)
+            tail_length = total_messages - (compressed_blocks * COMPRESSION_THRESHOLD)
+
+            if compressed_blocks > 0:
+                compression_info = (
+                    f"\n\n🔍 Использовано {compressed_blocks} сжатых блоков "
+                    f"({compressed_blocks * COMPRESSION_THRESHOLD} сообщений)"
+                )
+                if tail_length > 0:
+                    compression_info += f" + {tail_length} последних сообщений"
 
         await typing_msg.delete()
 
@@ -853,6 +958,7 @@ def main():
     application.add_handler(CommandHandler("test_models", test_models))
     application.add_handler(CommandHandler("test_tokens", test_token_usage))
     application.add_handler(CommandHandler("compression_stats", check_compression))
+    application.add_handler(CommandHandler("storage", storage_command))
 
     # Регистрируем ConversationHandler
     application.add_handler(day1_conv_handler)

@@ -10,6 +10,8 @@ from project.Config import (
     TEMPERATURE,
 )
 
+from project.StorageManager import storage_manager
+
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -18,6 +20,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 Основные команды:\n"
         "/start - Начать общение\n"
         "/help - Показать справку\n"
+        "/storage - Показать всю историю чата\n"
         "/about - Данные о модели \n\n"
         "🔹 Режимы работы:\n"
         "/day1 - Включить режим чата с контекстом (день 1)\n"
@@ -41,6 +44,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔹 Основные:
 /help - Показать эту справку
 /about - Данные о текущей модели
+/storage - Показать всю историю чата
 /clear - Очистить историю диалога и сбросить режим
 
 🔹 Режимы работы:
@@ -73,15 +77,24 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(model_info_text)
 
 
-# Команда /clear - очистка истории диалога и сброс режима
 async def factory_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+
     # Очищаем все данные в chat_data
     context.chat_data.clear()
 
     # Также очищаем user_data на всякий случай
     context.user_data.clear()
 
-    await update.message.reply_text("✅ История полностью очищены!")
+    # Очищаем хранилище
+    storage_manager.clear_chat_history(chat_id)
+
+    await update.message.reply_text(
+        "🧹 История диалога очищена!\n"
+        "✅ Данные удалены из памяти\n"
+        "✅ Данные удалены из хранилища\n\n"
+        "Можете начать новый диалог с помощью /day1, /day2 или /day3"
+    )
 
     # Возвращаем END для завершения активных диалогов
     return ConversationHandler.END
@@ -92,6 +105,24 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отмена диалога"""
     await update.message.reply_text("Диалог завершен.")
     return ConversationHandler.END
+
+
+async def storage_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Команда для отображения всей истории чата
+    """
+    chat_id = update.effective_chat.id
+
+    # Показать текущую историю чата из хранилища
+    history_display = storage_manager.get_chat_history_for_display(chat_id)
+
+    await update.message.reply_text(
+        f"📁 История чата (автосохранение в JSON)\n"
+        f"═══════════════════════════════════════\n\n"
+        f"{history_display}\n\n"
+        f"ℹ️ История автоматически сохраняется после каждого сообщения\n"
+        f"🧹 Используйте /clear для очистки истории"
+    )
 
 
 # Обработка ошибок
