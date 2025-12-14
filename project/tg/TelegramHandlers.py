@@ -1,14 +1,14 @@
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
-import os
 
 logger = logging.getLogger(__name__)
 
-
-YANDEX_CLOUD_MODEL = os.getenv('YANDEX_CLOUD_MODEL')
-MAX_TOKENS = int(os.getenv('MAX_TOKENS'))
-TEMPERATURE = float(os.getenv('TEMPERATURE'))
+from project.Config import (
+    YANDEX_CLOUD_MODEL,
+    MAX_TOKENS,
+    TEMPERATURE,
+)
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):

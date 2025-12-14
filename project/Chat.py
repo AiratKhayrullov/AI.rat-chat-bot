@@ -1,14 +1,38 @@
 import logging
 from typing import List, Dict, Any
-import os
 import openai
 import time
 from typing import Optional
-from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
-from project.Promts import DEFAULT_SYSTEM_PROMPT, DAY2_SYSTEM_PROMPT, DAY3_SYSTEM_PROMPT
+from project.Config import (
+    TELEGRAM_BOT_TOKEN,
+    YANDEX_CLOUD_FOLDER,
+    YANDEX_CLOUD_API_KEY,
+    YANDEX_CLOUD_MODEL,
+    MAX_TOKENS,
+    TEMPERATURE,
+    YANDEX_MODELS,
+    MODEL_NAMES,
+    MODEL_PRICES,
+    DAY_1_STATE,
+    DAY_2_STATE,
+    DAY_3_STATE,
+    COMPRESSION_THRESHOLD,
+    MAX_HISTORY_LENGTH,
+    MAX_MESSAGE_LENGTH,
+    YANDEX_API_BASE_URL,
+    LOGGING_CONFIG,
+    print_config_summary
+)
+
+from project.Promts import (
+    DEFAULT_SYSTEM_PROMPT,
+    DAY2_SYSTEM_PROMPT,
+    DAY3_SYSTEM_PROMPT,
+)
+
 from project.TestCasesForDay8 import test_cases
 
 from project.tg.TelegramHandlers import (
@@ -20,56 +44,16 @@ from project.tg.TelegramHandlers import (
     error_handler
 )
 
-# Загружаем переменные из .env файла
-load_dotenv()
-
-# Включим логирование
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Настраиваем логирование
+logging.basicConfig(**LOGGING_CONFIG)
 logger = logging.getLogger(__name__)
-
-YANDEX_MODELS = [
-    "yandexgpt-lite/latest", # YandexGPT 5 Lite
-    "yandexgpt/latest", # YandexGPT 5 Pro
-    "yandexgpt/rc", # YandexGPT 5.1 Pro
-    "aliceai-llm/latest", # Alice AI LLM
-]
-
-MODEL_NAMES = {
-    "yandexgpt-lite/latest": "YandexGPT 5 Lite",
-    "yandexgpt/latest": "YandexGPT 5 Pro",
-    "yandexgpt/rc": "YandexGPT 5.1 Pro",
-    "aliceai-llm/latest": "Alice AI LLM",
-}
-
-MODEL_PRICES = {
-    "yandexgpt-lite/latest": {"input":0.10, "output": 0.10},    # 0,10 ₽ за 1K токенов
-    "yandexgpt/latest": {"input": 0.60, "output": 0.60},    # 0,60 ₽ за 1K токенов
-    "yandexgpt/rc": {"input": 0.20, "output": 0.20},    # 0,20 ₽ за 1K токенов
-    "aliceai-llm/latest": {"input": 0.25, "output": 1.00},  # 0,25 ₽ ввод, 1,00 ₽ вывод
-}
-
-# Конфигурация
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-YANDEX_CLOUD_FOLDER = os.getenv('YANDEX_CLOUD_FOLDER')
-YANDEX_CLOUD_API_KEY = os.getenv('YANDEX_CLOUD_API_KEY')
-YANDEX_CLOUD_MODEL = os.getenv('YANDEX_CLOUD_MODEL')
-MAX_TOKENS = int(os.getenv('MAX_TOKENS'))
-TEMPERATURE = float(os.getenv('TEMPERATURE'))
 
 # Инициализация клиента Yandex GPT
 yandex_client = openai.OpenAI(
     api_key=YANDEX_CLOUD_API_KEY,
-    base_url="https://llm.api.cloud.yandex.net/v1",  # Используем chat/completions API
+    base_url=YANDEX_API_BASE_URL,
     project=YANDEX_CLOUD_FOLDER
 )
-
-# Состояния для ConversationHandler
-DAY_1_STATE = 1
-DAY_2_STATE = 2
-DAY_3_STATE = 3
 
 ######################################################################################################
 ######################################################################################################
@@ -79,9 +63,6 @@ def estimate_tokens(text: str) -> int:
     """Примерная оценка количества токенов в тексте"""
     # Примерная оценка: 1 токен ≈ 4 символа для русского текста
     return len(text) // 4
-
-# Константа для сжатия диалога
-COMPRESSION_THRESHOLD = 10  # Сжимать каждые N сообщений
 
 
 # Функция для сжатия истории диалога
@@ -231,15 +212,14 @@ async def check_compression(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stats_text += f"   └─ Примерно токенов: {estimate_tokens(msg['content'])}\n"
 
     # Разбиваем сообщение на части, если оно слишком длинное
-    max_message_length = 4000  # Лимит Telegram
-    if len(stats_text) > max_message_length:
+    if len(stats_text) > MAX_MESSAGE_LENGTH:
         # Разбиваем на части
         parts = []
         current_part = ""
         lines = stats_text.split('\n')
 
         for line in lines:
-            if len(current_part) + len(line) + 1 > max_message_length:
+            if len(current_part) + len(line) + 1 > MAX_MESSAGE_LENGTH:
                 parts.append(current_part)
                 current_part = line + '\n'
             else:
@@ -321,7 +301,6 @@ async def test_token_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "max_tokens_limit": MAX_TOKENS
             }
 
-
             results.append(result)
 
             status_emoji = "⚠️" if result['was_truncated'] else "✅"
@@ -360,7 +339,6 @@ async def test_token_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         analysis_text += "\n"
 
-
     await update.message.reply_text(analysis_text)
 
     await update.message.reply_text("\n🤖 ЗАПРАШИВАЮ ГЛУБОКИЙ АНАЛИЗ У МОДЕЛИ...")
@@ -374,7 +352,6 @@ async def test_token_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def perform_ai_analysis(analysis_text: str) -> str:
-
     # Формируем детальный промпт для анализа
     analysis_prompt = """Ты - эксперт по языковым моделям. Проанализируй результаты тестирования работы с токенами.
 
@@ -393,7 +370,7 @@ async def perform_ai_analysis(analysis_text: str) -> str:
 
 """.format(
         max_tokens=MAX_TOKENS,
-        test_results= analysis_text
+        test_results=analysis_text
     )
 
     try:
@@ -545,7 +522,6 @@ async def test_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_to_ai_for_analysis(update: Update, results: list):
-
     # Формируем промпт для анализа
     analysis_prompt = """
     Проанализируйте результаты тестирования разных моделей Yandex GPT по следующим параметрам:
@@ -778,8 +754,8 @@ async def handle_gpt_request(
             chat_history.append({"role": "user", "content": user_message})
             chat_history.append({"role": "assistant", "content": response})
 
-            if len(chat_history) > 50:
-                chat_history = chat_history[-50:]
+            if len(chat_history) > MAX_HISTORY_LENGTH:
+                chat_history = chat_history[-MAX_HISTORY_LENGTH:]
 
             context.chat_data['chat_history'] = chat_history
 
@@ -802,6 +778,21 @@ async def handle_gpt_request(
         logger.error(f"Ошибка: {e}")
         await update.message.reply_text(
             f"⚠️ Произошла ошибка при обращении к Yandex GPT:\n\n{str(e)}"
+        )
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
+
+    if not user_text.startswith('/'):
+        logger.info(f"Сообщение от {update.effective_user.id}: {user_text}")
+        await update.message.reply_text(
+            "🤖 Выберите режим работы:\n\n"
+            "🔹 /day1 - Обычный диалог\n"
+            "🔹 /day2 - Диалог с JSON ответом\n"
+            "🔹 /compression_stats - Показать статистику сжатия истории диалога\n"
+            "🔹 /test_models - Тестирование моделей\n"
+            "🔹 /help - Справка по командам"
         )
 
 
@@ -847,7 +838,7 @@ def main():
 
     # Создаем ConversationHandler для режима day3
     day3_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('day3', day3_chat)],  # Исправлено на 'day3'
+        entry_points=[CommandHandler('day3', day3_chat)],
         states={
             DAY_3_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_day3_dialog)]
         },
@@ -873,12 +864,7 @@ def main():
 
     # Запускаем бота
     logger.info("Бот запущен...")
-    print("=" * 50)
-    print("🤖 Телеграм-бот с Yandex GPT запущен!")
-    print(f"📊 Модель: {YANDEX_CLOUD_MODEL}")
-    print(f"🔥 Температура: {TEMPERATURE}")
-    print(f"🔢 Макс. токенов: {MAX_TOKENS}")
-    print("=" * 50)
+    print_config_summary()
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
