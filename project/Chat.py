@@ -8,10 +8,17 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
-from project.Promts import DEFAULT_SYSTEM_PROMPT
-from project.Promts import DAY2_SYSTEM_PROMPT
-from project.Promts import DAY3_SYSTEM_PROMPT
+from project.Promts import DEFAULT_SYSTEM_PROMPT, DAY2_SYSTEM_PROMPT, DAY3_SYSTEM_PROMPT
 from project.TestCasesForDay8 import test_cases
+
+from project.tg.TelegramHandlers import (
+    start,
+    help_command,
+    about,
+    factory_reset,
+    cancel,
+    error_handler
+)
 
 # Загружаем переменные из .env файла
 load_dotenv()
@@ -63,80 +70,6 @@ yandex_client = openai.OpenAI(
 DAY_1_STATE = 1
 DAY_2_STATE = 2
 DAY_3_STATE = 3
-
-######################################################################################################
-######################################################################################################
-
-# Команда /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    welcome_text = (
-        f"Привет, {user.first_name}! Я твой телеграм-бот с Yandex GPT.\n\n"
-        "🔹 Основные команды:\n"
-        "/start - Начать общение\n"
-        "/help - Показать справку\n"
-        "/about - Данные о модели \n\n"
-        "🔹 Режимы работы:\n"
-        "/day1 - Включить режим чата с контекстом (день 1)\n"
-        "/day2 - Режим диалога с форматом ответа в JSON на трех языках (день 2)\n"
-        "/day3 - Режим редактора писем (день 3)\n"
-        "📋 Анализ:\n"
-        "/test_models - Тестирование моделей (день 7)\n"
-        "/test_tokens - Тестирование токенов (день 8)\n"
-        "/compression_stats - Показать статистику сжатия истории диалога (день 9)\n"
-        "/clear - Очистить историю диалога и сбросить режим\n\n"
-        "⚡ Выбери режим и начинай общение!"
-    )
-    await update.message.reply_text(welcome_text)
-
-
-# Команда /help
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
-🤖 Доступные команды:
-
-🔹 Основные:
-/help - Показать эту справку
-/about - Данные о текущей модели
-/clear - Очистить историю диалога и сбросить режим
-
-🔹 Режимы работы:
-/day1 - Включить обычный режим чата (с контекстом, день 1)
-/day2 - Режим диалога с форматом ответа в JSON на трех языках (день 2)
-/day3 - Режим редактора писем (день 3)
-
-📋 Анализ:
-/test_models - Сравнение разных моделей Yandex GPT
-/test_tokens - Сравнительной анализ токенов
-/compression_stats - Показать статистику сжатия истории диалога"
-    """
-    await update.message.reply_text(help_text)
-
-
-# Команда /about
-async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    model_info_text = (
-        f"📊 Информация о модели:\n"
-        f"• Модель: {YANDEX_CLOUD_MODEL}\n"
-        f"• Макс. токенов: {MAX_TOKENS}\n"
-        f"• Температура: {TEMPERATURE}\n"
-    )
-    await update.message.reply_text(model_info_text)
-
-
-# Команда /clear - очистка истории диалога и сброс режима
-async def factory_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Очищаем все данные в chat_data
-    context.chat_data.clear()
-
-    # Также очищаем user_data на всякий случай
-    context.user_data.clear()
-
-    await update.message.reply_text("✅ История полностью очищены!")
-
-    # Возвращаем END для завершения активных диалогов
-    return ConversationHandler.END
-
 
 ######################################################################################################
 ######################################################################################################
@@ -872,40 +805,6 @@ async def handle_gpt_request(
         )
 
 
-# Отмена диалога
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отмена диалога"""
-    await update.message.reply_text("Диалог завершен.")
-    return ConversationHandler.END
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-
-    if not user_text.startswith('/'):
-        logger.info(f"Сообщение от {update.effective_user.id}: {user_text}")
-        await update.message.reply_text(
-            "🤖 Выберите режим работы:\n\n"
-            "🔹 /day1 - Обычный диалог\n"
-            "🔹 /day2 - Диалог с JSON ответом\n"
-            "🔹 /compression_stats - Показать статистику сжатия истории диалога\n"
-            "🔹 /test_models - Тестирование моделей\n"
-            "🔹 /help - Справка по командам"
-        )
-
-
-# Обработка ошибок
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ошибок"""
-    logger.error(f"Ошибка: {context.error}")
-
-    # Отправляем сообщение об ошибке пользователю
-    if update and update.effective_message:
-        await update.effective_message.reply_text(
-            "😔 Произошла ошибка. Попробуйте еще раз позже."
-        )
-
-
 def main():
     """Запуск бота"""
 
@@ -960,7 +859,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("clear", factory_reset))
     application.add_handler(CommandHandler("about", about))
-    application.add_handler(CommandHandler("test_models", test_models))  # Добавлена новая команда
+    application.add_handler(CommandHandler("test_models", test_models))
     application.add_handler(CommandHandler("test_tokens", test_token_usage))
     application.add_handler(CommandHandler("compression_stats", check_compression))
 
@@ -968,9 +867,6 @@ def main():
     application.add_handler(day1_conv_handler)
     application.add_handler(day2_conv_handler)
     application.add_handler(day3_conv_handler)
-
-    # Регистрируем обработчик обычных сообщений
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Регистрируем обработчик ошибок
     application.add_error_handler(error_handler)
