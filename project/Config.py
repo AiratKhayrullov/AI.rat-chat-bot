@@ -9,6 +9,9 @@ load_dotenv()
 # НАСТРОЙКИ ИЗ .ENV ФАЙЛА
 # ============================================================================
 
+# MCP Server Configuration
+MCP_SERVER_URL = os.getenv('MCP_SERVER_URL')  # Замените на реальный URL
+
 # Конфигурация Telegram
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 

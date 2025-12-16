@@ -1,10 +1,12 @@
 import logging
-from typing import List, Dict, Any
 import openai
 import time
 from typing import Optional
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+import json
+import requests
+from typing import List, Dict, Any
 
 from project.Config import (
     TELEGRAM_BOT_TOKEN,
@@ -22,6 +24,7 @@ from project.Config import (
     COMPRESSION_THRESHOLD,
     MAX_HISTORY_LENGTH,
     MAX_MESSAGE_LENGTH,
+    MCP_SERVER_URL,
     YANDEX_API_BASE_URL,
     LOGGING_CONFIG,
     print_config_summary
@@ -54,6 +57,206 @@ yandex_client = openai.OpenAI(
     base_url=YANDEX_API_BASE_URL,
     project=YANDEX_CLOUD_FOLDER
 )
+
+# Создаем клиента
+mcp_client = openai.OpenAI(
+    api_key=YANDEX_CLOUD_API_KEY,
+    base_url="https://rest-assistant.api.cloud.yandex.net/v1",
+    project=YANDEX_CLOUD_FOLDER
+)
+
+
+######################################################################################################
+# MCP Functions
+######################################################################################################
+async def get_mcp_tools() -> List[Dict[str, Any]]:
+    """
+    Получает список доступных инструментов от MCP-сервера
+    """
+    try:
+        # Используем Responses API для получения инструментов MCP
+        response = mcp_client.responses.create(
+            model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
+            input=[
+                {
+                    "role": "user",
+                    "content": "Покажи список доступных инструментов"
+                }
+            ],
+            # Указываем MCP-сервер
+            tools=[
+                {
+                    "server_label": "airat-mcp",
+                    "server_url": MCP_SERVER_URL,
+                    "type": "mcp",
+                    "metadata": {
+                        "description": "MCP сервер с доступными инструментами"
+                    }
+                }
+            ]
+        )
+
+        # Парсим ответ для получения информации об инструментах
+        tools_info = []
+
+        # Проверяем, есть ли информация об инструментах в ответе
+        if hasattr(response, 'output_text'):
+            # Если есть текстовый ответ с описанием инструментов
+            tools_info.append({
+                "name": "mcp_tools",
+                "description": response.output_text[:1000] + "..." if len(
+                    response.output_text) > 1000 else response.output_text,
+                "type": "mcp",
+                "server_url": MCP_SERVER_URL
+            })
+
+        return tools_info
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении инструментов MCP: {e}")
+        return []
+
+
+async def get_mcp_tools_direct() -> List[Dict[str, Any]]:
+    """
+    Прямое получение инструментов от MCP-сервера через HTTP запрос
+    """
+    try:
+        # Проверяем доступность MCP-сервера
+        response = requests.get(f"{MCP_SERVER_URL}/.well-known/mcp.json", timeout=10)
+
+        if response.status_code == 200:
+            mcp_info = response.json()
+            tools = []
+
+            if "tools" in mcp_info:
+                for tool_name, tool_info in mcp_info["tools"].items():
+                    tools.append({
+                        "name": tool_name,
+                        "description": tool_info.get("description", "Описание отсутствует"),
+                        "input_schema": tool_info.get("inputSchema", {}),
+                        "type": "mcp"
+                    })
+
+            return tools
+        else:
+            logger.warning(f"MCP сервер не вернул инструменты. Status: {response.status_code}")
+            return []
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка подключения к MCP-серверу: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"Ошибка при обработке ответа MCP: {e}")
+        return []
+
+
+async def test_mcp_tools(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Тестирует подключение к MCP-серверу и показывает доступные инструменты
+    """
+    await update.message.reply_text("🔌 Тестирую подключение к MCP-серверу...")
+
+    try:
+        # Пробуем прямое подключение
+        await update.message.reply_text(f"📡 Проверяю MCP-сервер: {MCP_SERVER_URL}")
+
+        direct_tools = await get_mcp_tools_direct()
+
+        if direct_tools:
+            response_text = "✅ MCP-сервер доступен!\n\n"
+            response_text += "📋 Доступные инструменты (прямое подключение):\n\n"
+
+            for i, tool in enumerate(direct_tools, 1):
+                response_text += f"{i}. 🔧 **{tool['name']}**\n"
+                response_text += f"   📝 Описание: {tool.get('description', 'Нет описания')}\n"
+
+                if 'input_schema' in tool and tool['input_schema']:
+                    response_text += f"   📋 Параметры: {json.dumps(tool['input_schema'], ensure_ascii=False, indent=2)}\n"
+
+                response_text += "\n"
+
+            await update.message.reply_text(response_text)
+        else:
+            # Пробуем через Responses API
+            await update.message.reply_text("🔄 Пробую получить инструменты через Responses API...")
+
+            api_tools = await get_mcp_tools()
+
+            if api_tools:
+                response_text = "✅ MCP-инструменты получены через Responses API!\n\n"
+                response_text += "📋 Доступные инструменты:\n\n"
+
+                for i, tool in enumerate(api_tools, 1):
+                    response_text += f"{i}. 🔧 **{tool['name']}**\n"
+                    response_text += f"   📝 Описание: {tool.get('description', 'Нет описания')}\n"
+                    response_text += f"   🌐 Сервер: {tool.get('server_url', 'Не указан')}\n\n"
+
+                await update.message.reply_text(response_text)
+            else:
+                await update.message.reply_text(
+                    "❌ Не удалось получить инструменты MCP.\n"
+                    "Проверьте:\n"
+                    "1. URL MCP-сервера в конфигурации\n"
+                    "2. Доступность MCP-сервера\n"
+                    "3. API ключ с правильной областью действия\n\n"
+                    f"Текущий URL: {MCP_SERVER_URL}"
+                )
+
+    except Exception as e:
+        logger.error(f"Ошибка при тестировании MCP: {e}")
+        await update.message.reply_text(f"❌ Критическая ошибка при тестировании MCP: {str(e)}")
+
+
+async def use_mcp_tool(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Использование инструмента MCP через бота
+    """
+    user_message = update.message.text
+
+    if not user_message or user_message.startswith('/'):
+        await update.message.reply_text(
+            "🔧 Использование MCP инструментов\n\n"
+            "Доступные команды:\n"
+            "/mcp_tools - Показать доступные инструменты\n"
+            "/mcp_test - Протестировать подключение к MCP\n\n"
+            "Чтобы использовать инструмент, напишите его название и параметры.\n"
+            "Например: 'crm_lookup Иван Иванов'"
+        )
+        return
+
+    await update.message.reply_text("🔧 Использую MCP инструмент...")
+
+    try:
+        # Используем Responses API для вызова MCP инструмента
+        response = yandex_client.responses.create(
+            model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
+            input=[
+                {
+                    "role": "user",
+                    "content": user_message
+                }
+            ],
+            tools=[
+                {
+                    "server_label": "mcp_tools",
+                    "server_url": MCP_SERVER_URL,
+                    "type": "mcp",
+                    "metadata": {
+                        "description": "Различные инструменты через MCP"
+                    }
+                }
+            ]
+        )
+
+        if hasattr(response, 'output_text'):
+            await update.message.reply_text(f"✅ Результат MCP инструмента:\n\n{response.output_text}")
+        else:
+            await update.message.reply_text("ℹ️ MCP инструмент выполнен, но не вернул текстовый результат.")
+
+    except Exception as e:
+        logger.error(f"Ошибка при использовании MCP инструмента: {e}")
+        await update.message.reply_text(f"❌ Ошибка при использовании MCP инструмента: {str(e)}")
 
 ######################################################################################################
 ######################################################################################################
@@ -853,6 +1056,11 @@ def main():
     application.add_handler(CommandHandler("test_models", test_models))
     application.add_handler(CommandHandler("test_tokens", test_token_usage))
     application.add_handler(CommandHandler("compression_stats", check_compression))
+
+    # Регистрируем MCP обработчики
+    application.add_handler(CommandHandler("mcp_tools", test_mcp_tools))
+    application.add_handler(CommandHandler("mcp_test", test_mcp_tools))
+
 
     # Регистрируем ConversationHandler
     application.add_handler(day1_conv_handler)
