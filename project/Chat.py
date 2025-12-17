@@ -7,6 +7,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import json
 import requests
 from typing import List, Dict, Any
+import aiohttp
+import asyncio
 
 from project.Config import (
     TELEGRAM_BOT_TOKEN,
@@ -21,6 +23,7 @@ from project.Config import (
     DAY_1_STATE,
     DAY_2_STATE,
     DAY_3_STATE,
+    DAY_12_MCP_STATE,
     COMPRESSION_THRESHOLD,
     MAX_HISTORY_LENGTH,
     MAX_MESSAGE_LENGTH,
@@ -36,7 +39,6 @@ from project.Promts import (
     DAY3_SYSTEM_PROMPT,
 )
 
-from project.TestCasesForDay8 import test_cases
 
 from project.tg.TelegramHandlers import (
     start,
@@ -443,364 +445,6 @@ async def check_compression(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ######################################################################################################
 ######################################################################################################
 
-async def test_token_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🧪 Начинаю тестирование использования токенов...")
-
-    results: List[Dict[str, Any]] = []
-    data_for_analytics = []
-
-    for test_case in test_cases:
-        try:
-            await update.message.reply_text(f"\n{test_case['name']}\nОписание: {test_case['description']}")
-
-            # Замер времени
-            start_time = time.time()
-
-            # Подготавливаем сообщения
-            messages = [
-                {"role": "system", "content": "Ты полезный ассистент"},
-                {"role": "user", "content": test_case['prompt']}
-            ]
-
-            response = yandex_client.chat.completions.create(
-                model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
-                messages=messages,
-                max_tokens=MAX_TOKENS,
-                temperature=TEMPERATURE
-            )
-
-            end_time = time.time()
-            response_time = end_time - start_time
-
-            # Получаем информацию о токенах из ответа API
-            completion = response
-            input_tokens = completion.usage.prompt_tokens
-            output_tokens = completion.usage.completion_tokens
-            total_tokens = completion.usage.total_tokens
-
-            # Проверяем, был ли ответ обрезан
-            response_text = completion.choices[0].message.content
-            was_truncated = response.choices[0].finish_reason == "length"
-
-            # Рассчитываем процент использования лимита
-            limit_usage_percent = (output_tokens / MAX_TOKENS) * 100
-
-            # Рассчитываем стоимость
-            price_info = MODEL_PRICES.get("yandexgpt/latest")
-            cost = (input_tokens * price_info["input"] / 1000) + (output_tokens * price_info["output"] / 1000)
-
-            result = {
-                "name": test_case['name'],
-                "description": test_case['description'],
-                "success": True,
-                "response_time": response_time,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": total_tokens,
-                "limit_usage_percent": limit_usage_percent,
-                "was_truncated": was_truncated,
-                "cost": cost,
-                "response_preview": response_text[:200] + "..." if len(response_text) > 200 else response_text,
-                "max_tokens_limit": MAX_TOKENS
-            }
-
-            results.append(result)
-
-            status_emoji = "⚠️" if result['was_truncated'] else "✅"
-
-            await update.message.reply_text(
-                f"{status_emoji} Результат:\n"
-                f"⏱ Время: {result['response_time']:.2f} сек\n"
-                f"🔢 Токены запроса: {result['input_tokens']}\n"
-                f"🔢 Токены ответа: {result['output_tokens']}\n"
-                f"🔢 Всего токенов: {result['total_tokens']}\n"
-                f"💰 Стоимость: {cost:.6f} ₽\n"
-                f"📊 Использование лимита: {result['limit_usage_percent']:.1f}%\n"
-                f"{'⚠️ Ответ был обрезан' if result['was_truncated'] else '✅ Ответ полный'}\n"
-                f"📝 Предпросмотр ответа:\n{result['response_preview']}"
-            )
-
-        except Exception as e:
-            await update.message.reply_text(f"❌ Критическая ошибка при выполнении теста: {str(e)}")
-
-    # Анализ и сравнение результатов
-    await update.message.reply_text("\n📊 СРАВНИТЕЛЬНЫЙ АНАЛИЗ РЕЗУЛЬТАТОВ:")
-
-    analysis_text = "🔍 Выводы по тестированию токенов:\n\n"
-
-    # Анализируем каждый тест
-    for i, result in enumerate(results):
-        analysis_text += f"{result['name']}:\n"
-
-        analysis_text += (
-            f"  • Токены: {result['input_tokens']} (вх) + {result['output_tokens']} (вых) = {result['total_tokens']}\n"
-            f"  • Время: {result['response_time']:.2f} сек\n"
-            f"  • Использование лимита: {result['limit_usage_percent']:.1f}%\n"
-            f"  • Стоимость: {result['cost']:.6f} ₽\n"
-            f"  • Статус: {'⚠️ Обрезан' if result['was_truncated'] else '✅ Полный'}\n"
-        )
-
-        analysis_text += "\n"
-
-    await update.message.reply_text(analysis_text)
-
-    await update.message.reply_text("\n🤖 ЗАПРАШИВАЮ ГЛУБОКИЙ АНАЛИЗ У МОДЕЛИ...")
-
-    try:
-        ai_analysis = await perform_ai_analysis(analysis_text)
-        await update.message.reply_text(f"📊 РЕЗУЛЬТАТЫ АНАЛИЗА МОДЕЛЬЮ:\n\n{ai_analysis}")
-    except Exception as e:
-        logger.error(f"Ошибка при анализе моделью: {e}")
-        await update.message.reply_text(f"⚠️ Не удалось получить анализ от модели: {str(e)}")
-
-
-async def perform_ai_analysis(analysis_text: str) -> str:
-    # Формируем детальный промпт для анализа
-    analysis_prompt = """Ты - эксперт по языковым моделям. Проанализируй результаты тестирования работы с токенами.
-
-ДАННЫЕ ТЕСТА:
-Были протестированы 3 типа запросов:
-1. Короткий запрос
-2. Средний запрос
-3. Длинный запрос
-
-ЛИМИТ МОДЕЛИ: {max_tokens} токенов
-
-РЕЗУЛЬТАТЫ:
-{test_results}
-
-Выполни глубокий анализ на основе вышеизложенных данных о том, как меняется поведение модели в зависимости от токенов
-
-""".format(
-        max_tokens=MAX_TOKENS,
-        test_results=analysis_text
-    )
-
-    try:
-        response = yandex_client.chat.completions.create(
-            model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """Ты опытный AI-инженер и исследователь языковых моделей. 
-Ты специализируешься на оптимизации использования токенов и анализе производительности LLM.
-Твоя задача - предоставить глубокий, практический анализ с конкретными рекомендациями."""
-                },
-                {"role": "user", "content": analysis_prompt}
-            ],
-            max_tokens=5000,
-            temperature=0.7
-        )
-
-        return response.choices[0].message.content
-
-    except Exception as e:
-        raise Exception(f"Ошибка при анализе моделью: {str(e)}")
-
-
-def format_test_results_for_analysis(results: List[Dict[str, Any]]) -> str:
-    """Форматирует результаты тестирования для анализа моделью"""
-
-    formatted = ""
-
-    for result in results:
-        formatted += f"ТЕСТ: {result['name']}\n"
-        formatted += f"Описание: {result['description']}\n"
-        formatted += f"Статус: {'УСПЕХ' if result.get('success', False) else 'ОШИБКА'}\n"
-
-        formatted += f"\nМЕТРИКИ:\n"
-        formatted += f"• Время ответа: {result['response_time']:.2f} сек\n"
-        formatted += f"• Токены запроса: {result['input_tokens']}\n"
-        formatted += f"• Токены ответа: {result['output_tokens']}\n"
-        formatted += f"• Всего токенов: {result['total_tokens']}\n"
-        formatted += f"• Использование лимита: {result['limit_usage_percent']:.1f}%\n"
-        formatted += f"• Ответ обрезан: {'ДА' if result['was_truncated'] else 'НЕТ'}\n"
-        formatted += f"• Причина завершения: {'length (обрезка)' if result['was_truncated'] else 'stop (полный)'}\n"
-
-        formatted += f"\nОТВЕТ: {result['input_tokens']}\n"
-
-    return formatted
-
-######################################################################################################
-######################################################################################################
-
-async def test_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    test_prompt = "Объясни, что такое квантовая запутанность, простыми словами. Приведи аналогию из повседневной жизни."
-
-    await update.message.reply_text(
-        "🧪 Начинаю тестирование разных моделей Yandex GPT...\n"
-        f"Тестовый промпт: '{test_prompt}'\n\n"
-        f"Тестирую модели: {', '.join(MODEL_NAMES.values())}\n"
-    )
-
-    results = []
-
-    for model_name in YANDEX_MODELS:
-        try:
-            await update.message.reply_text(f"🚀 Тестирую модель: {MODEL_NAMES[model_name]}...")
-
-            # Замер времени
-            start_time = time.time()
-
-            logger.info(f"Вызов API: model={model_name}, folder={YANDEX_CLOUD_FOLDER}")
-
-            # Делаем запрос
-            response = yandex_client.chat.completions.create(
-                model=f"gpt://{YANDEX_CLOUD_FOLDER}/{model_name}",
-                messages=[
-                    {"role": "system", "content": "Ты полезный ассистент"},
-                    {"role": "user", "content": test_prompt}
-                ],
-                max_tokens=MAX_TOKENS,
-                temperature=TEMPERATURE
-            )
-
-            end_time = time.time()
-            response_time = end_time - start_time
-
-            # Получаем информацию о токенах
-            completion = response
-            input_tokens = completion.usage.prompt_tokens
-            output_tokens = completion.usage.completion_tokens
-            total_tokens = completion.usage.total_tokens
-
-            # Рассчитываем стоимость
-            price_info = MODEL_PRICES.get(model_name, {"input": 0, "output": 0})
-            cost = (input_tokens * price_info["input"] / 1000) + (output_tokens * price_info["output"] / 1000)
-
-            result = {
-                "model": model_name,
-                "model_display_name": MODEL_NAMES[model_name],
-                "time": response_time,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": total_tokens,
-                "cost": cost,
-                "response": completion.choices[0].message.content[:MAX_TOKENS] + "..." if len(
-                    completion.choices[0].message.content) > MAX_TOKENS else completion.choices[0].message.content
-            }
-
-            results.append(result)
-
-            # Отправляем промежуточный результат
-            await update.message.reply_text(
-                f"✅ Модель: {MODEL_NAMES[model_name]}\n"
-                f"⏱ Время: {response_time:.2f} сек\n"
-                f"🔢 Токены: {input_tokens}(вх) + {output_tokens}(вых) = {total_tokens}\n"
-                f"💰 Стоимость: {cost:.6f} ₽\n"
-                f"📝 Ответ:\n{result['response']}"
-            )
-
-        except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка при тестировании модели {MODEL_NAMES[model_name]}: {str(e)}")
-            results.append({
-                "model": model_name,
-                "model_display_name": MODEL_NAMES[model_name],
-                "error": str(e)
-            })
-
-    # Сравниваем результаты
-    await update.message.reply_text("📊 ИТОГОВОЕ СРАВНЕНИЕ МОДЕЛЕЙ:")
-
-    comparison_text = "🔍 Сравнение по времени:\n"
-    for result in sorted(results, key=lambda x: x.get('time', 999)):
-        if 'error' not in result:
-            comparison_text += f"• {result['model_display_name']}: {result['time']:.2f} сек\n"
-
-    comparison_text += "\n🔢 Сравнение по токенам:\n"
-    for result in sorted(results, key=lambda x: x.get('total_tokens', 999)):
-        if 'error' not in result:
-            comparison_text += f"• {result['model_display_name']}: {result['total_tokens']} токенов\n"
-
-    comparison_text += "\n💰 Сравнение по стоимости:\n"
-
-    for result in sorted(results, key=lambda x: x.get('cost', 999)):
-        cost_display = f"{result['cost']:.3f}".rstrip('0').rstrip('.') + " ₽"
-        comparison_text += f"• {result['model_display_name']}: {cost_display}\n"
-
-    await update.message.reply_text(comparison_text)
-
-    # Отправляем данные в AI для анализа
-    await send_to_ai_for_analysis(update, results)
-
-
-async def send_to_ai_for_analysis(update: Update, results: list):
-    # Формируем промпт для анализа
-    analysis_prompt = """
-    Проанализируйте результаты тестирования разных моделей Yandex GPT по следующим параметрам:
-    1. Время ответа
-    2. Количество токенов (входных, выходных, общих)
-    3. Стоимость выполнения запроса (не одного токена, а всю сумму итоговую)
-    4. Качество ответов
-
-    Выведите сравнительный анализ и рекомендации по выбору модели для разных сценариев использования.
-
-    Результаты тестирования:
-    """
-
-    for result in results:
-        if 'error' not in result:
-
-            # Форматируем стоимость для лучшей читаемости
-            if result['cost'] < 0.001:
-                cost_display = f"{result['cost']:.8f}".rstrip('0').rstrip('.') + " ₽"
-            elif result['cost'] < 0.01:
-                cost_display = f"{result['cost']:.6f}".rstrip('0').rstrip('.') + " ₽"
-            else:
-                cost_display = f"{result['cost']:.4f}".rstrip('0').rstrip('.') + " ₽"
-            analysis_prompt += f"""
-            Модель: {result['model_display_name']}
-            • Время ответа: {result['time']:.2f} секунд
-            • Токены: входные={result['input_tokens']}, выходные={result['output_tokens']}, всего={result['total_tokens']}
-            • Стоимость: {cost_display}
-            • Ответ: {result['response']}
-            """
-        else:
-            analysis_prompt += f"""
-            Модель: {result['model_display_name']}
-            • ОШИБКА: {result['error']}
-            """
-
-    analysis_prompt += """
-    Проанализируйте и предоставьте:
-    1. Рейтинг моделей по скорости
-    2. Рейтинг моделей по экономичности (не одного токена, а всю сумму итоговую)
-    3. Рейтинг моделей по качеству ответов (на основе содержания ответов)
-    4. Общие рекомендации для разных use-cases
-
-    Предоставьте ответ в структурированном виде с обоснованием.
-    """
-
-    await update.message.reply_text("🤖 Запрашиваю анализ результатов у AI...")
-
-    try:
-        # Используем основную модель для анализа
-        response = yandex_client.chat.completions.create(
-            model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
-            messages=[
-                {"role": "system",
-                 "content": "Ты опытный аналитик в области ИИ. Ты анализируешь результаты тестирования моделей и даешь профессиональные рекомендации."},
-                {"role": "user", "content": analysis_prompt}
-            ],
-            max_tokens=2000,
-            temperature=0.7
-        )
-
-        analysis_result = response.choices[0].message.content
-
-        await update.message.reply_text(
-            "📈 РЕЗУЛЬТАТЫ АНАЛИЗА AI:\n\n" + analysis_result
-        )
-
-    except Exception as e:
-        logger.error(f"Ошибка при анализе результатов: {e}")
-        await update.message.reply_text(
-            f"⚠️ Не удалось получить анализ от AI: {str(e)}"
-        )
-
-######################################################################################################
-######################################################################################################
-
 async def handle_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str, next_state: int):
     user_message = update.message.text
 
@@ -871,6 +515,29 @@ async def day3_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Отправьте текст письма:"
     )
     return DAY_3_STATE
+
+
+# Обработчик команды /day12_mcp
+async def day12_mcp_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.chat_data['current_mode'] = 'day12_mcp'
+    context.chat_data['system_prompt'] = DEFAULT_SYSTEM_PROMPT
+
+    await update.message.reply_text(
+        "🔧 **Режим диалога с Yandex GPT и MCP-инструментами**\n\n"
+        "Я буду использовать поисковые инструменты для ответов на ваши вопросы.\n"
+        "Просто напишите ваш запрос.\n\n"
+    )
+    return DAY_12_MCP_STATE
+
+# Обработчик сообщений в режиме MCP
+async def handle_day12_mcp_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_message = update.message.text
+    if user_message.startswith('/'):
+        await update.message.reply_text("Диалог прерван. Используйте /day1_mcp чтобы начать заново.")
+        return ConversationHandler.END
+
+    await handle_gpt_request_mcp(update, context, user_message, store_history=True)
+    return DAY_12_MCP_STATE
 
 ######################################################################################################
 ######################################################################################################
@@ -949,7 +616,7 @@ async def handle_gpt_request(
         response = await get_yandex_gpt_response(
             user_message=user_message,
             system_prompt=system_prompt,
-            chat_history=final_history[1:]  # Пропускаем первый системный промпт, т.к. он уже в истории
+            chat_history=final_history[1:]
         )
 
         # Обновляем историю диалога, если нужно
@@ -984,6 +651,180 @@ async def handle_gpt_request(
         )
 
 
+async def handle_gpt_request_mcp(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        user_message: str,
+        store_history: bool = False
+):
+    typing_msg = None
+    try:
+        typing_msg = await update.message.reply_text("🔍 Анализирую запрос и подбираю инструменты...")
+
+        # Получаем системный промпт и историю
+        system_prompt = context.chat_data.get('system_prompt', DEFAULT_SYSTEM_PROMPT)
+        chat_history = context.chat_data.get('chat_history', [])
+
+        # Подготавливаем входные данные
+        messages = []
+        if chat_history:
+            messages.extend(chat_history)
+        else:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_message})
+
+        logger.info(f"MCP запрос: {user_message}")
+
+        # Шаг 1: Получаем ответ с инструментами
+        response = mcp_client.responses.create(
+            model=f"gpt://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
+            input=messages,
+            tools=[
+                {
+                    "web_search": {
+                        "filters": {
+                            "allowed_domains": [
+                                "habr.ru"
+                            ]
+                        },
+                        "user_location": {
+                            "region": "213",
+                        }
+                    }
+                },
+            ],
+            parallel_tool_calls=True
+        )
+
+        logger.info(f"Статус ответа: {response.status}")
+        logger.info(f"Тип ответа: {type(response)}")
+
+        # Шаг 2: Ищем запросы на выполнение инструментов
+        tool_results = []
+
+        for item in response.output:
+            # Если это запрос на выполнение инструмента
+            if hasattr(item, 'type') and item.type == 'mcp_approval_request':
+                logger.info(f"Найден запрос на выполнение инструмента: {item.name}")
+
+                # Извлекаем аргументы
+                if hasattr(item, 'arguments'):
+                    try:
+                        arguments = json.loads(item.arguments)
+                        logger.info(f"Аргументы инструмента: {arguments}")
+
+                        # Выполняем инструмент напрямую через MCP сервер
+                        tool_result = await execute_mcp_tool_directly(
+                            tool_name=item.name,
+                            arguments=arguments,
+                            server_url=MCP_SERVER_URL
+                        )
+
+                        if tool_result:
+                            tool_results.append({
+                                'tool': item.name,
+                                'result': tool_result
+                            })
+                            logger.info(f"Результат инструмента {item.name} получен")
+
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Ошибка парсинга аргументов: {e}")
+                    except Exception as e:
+                        logger.error(f"Ошибка выполнения инструмента: {e}")
+
+        # Шаг 3: Формируем финальный ответ
+        final_response = ""
+
+        if tool_results:
+            # Формируем сводку результатов
+            results_text = "🔍 **Результаты поиска:**\n\n"
+            for i, result in enumerate(tool_results, 1):
+                results_text += f"**{i}. {result['tool']}:**\n"
+                # Обрезаем слишком длинные результаты
+                result_text = result['result'][:2000] + "..." if len(result['result']) > 2000 else result['result']
+                results_text += f"{result_text}\n\n"
+
+        else:
+            # Если нет результатов инструментов, используем обычный ответ
+            if hasattr(response, 'output_text') and response.output_text:
+                final_response = response.output_text
+            else:
+                final_response = "Не удалось найти информацию по вашему запросу. Попробуйте переформулировать вопрос."
+
+        # Шаг 4: Обновляем историю (БЕЗ роли 'tool')
+        if store_history and final_response:
+            if not chat_history:
+                chat_history = []
+            chat_history.append({"role": "user", "content": user_message})
+            chat_history.append({"role": "assistant", "content": final_response})
+            if len(chat_history) > MAX_HISTORY_LENGTH:
+                chat_history = chat_history[-MAX_HISTORY_LENGTH:]
+            context.chat_data['chat_history'] = chat_history
+
+        # Удаляем сообщение "Думаю..."
+        if typing_msg:
+            try:
+                await typing_msg.delete()
+            except:
+                pass
+
+        # Отправляем ответ
+        if final_response.strip():
+            await update.message.reply_text(final_response[:4000])
+        else:
+            await update.message.reply_text("🤔 Не удалось получить ответ. Попробуйте еще раз.")
+
+    except Exception as e:
+        logger.error(f"Ошибка при запросе с MCP: {e}", exc_info=True)
+
+        if typing_msg:
+            try:
+                await typing_msg.delete()
+            except:
+                pass
+
+        await update.message.reply_text(f"⚠️ Ошибка: {str(e)}")
+
+
+
+
+
+async def execute_mcp_tool_directly(tool_name: str, arguments: dict, server_url: str) -> str:
+    """
+    Выполняет инструмент MCP напрямую через HTTP запрос
+    """
+    try:
+        logger.info(f"Выполняю инструмент {tool_name} с аргументами: {arguments}")
+
+        # Формируем URL для инструмента
+        tool_url = f"{server_url}/tools/{tool_name}"
+
+        # Подготавливаем тело запроса
+        request_body = arguments.get('body_application_json', {})
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                    tool_url,
+                    json=request_body,
+                    headers={'Content-Type': 'application/json'},
+                    timeout=30
+            ) as response:
+                if response.status == 200:
+                    result = await response.text()
+                    logger.info(f"Успешный ответ от инструмента {tool_name}")
+                    return result
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Ошибка инструмента {tool_name}: {response.status} - {error_text}")
+                    return f"Ошибка инструмента {tool_name}: {error_text}"
+
+    except asyncio.TimeoutError:
+        logger.error(f"Таймаут при выполнении инструмента {tool_name}")
+        return f"Таймаут при выполнении {tool_name}"
+    except Exception as e:
+        logger.error(f"Ошибка выполнения инструмента {tool_name}: {e}")
+        return f"Ошибка: {str(e)}"
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
 
@@ -993,6 +834,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🤖 Выберите режим работы:\n\n"
             "🔹 /day1 - Обычный диалог\n"
             "🔹 /day2 - Диалог с JSON ответом\n"
+            "🔹 /day12_mcp - Диалог с JSON ответом\n"
             "🔹 /compression_stats - Показать статистику сжатия истории диалога\n"
             "🔹 /test_models - Тестирование моделей\n"
             "🔹 /help - Справка по командам"
@@ -1048,13 +890,21 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
 
+    # Создаем ConversationHandler для режима day1 с MCP
+    day12_mcp_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('day12_mcp', day12_mcp_chat)],
+        states={
+            DAY_12_MCP_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_day12_mcp_dialog)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    application.add_handler(day12_mcp_conv_handler)
+
     # Регистрируем обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("clear", factory_reset))
     application.add_handler(CommandHandler("about", about))
-    application.add_handler(CommandHandler("test_models", test_models))
-    application.add_handler(CommandHandler("test_tokens", test_token_usage))
     application.add_handler(CommandHandler("compression_stats", check_compression))
 
     # Регистрируем MCP обработчики

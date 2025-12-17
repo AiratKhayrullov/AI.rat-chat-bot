@@ -57,6 +57,7 @@ MODEL_PRICES = {
 DAY_1_STATE = 1
 DAY_2_STATE = 2
 DAY_3_STATE = 3
+DAY_12_MCP_STATE = 3
 
 # Константа для сжатия диалога
 COMPRESSION_THRESHOLD = 10  # Сжимать каждые N сообщений
